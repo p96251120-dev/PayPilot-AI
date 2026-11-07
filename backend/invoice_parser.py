@@ -1,6 +1,7 @@
 import re
 import json
 import urllib.request
+import datetime
 from decimal import Decimal, ROUND_HALF_UP
 
 CURRENCY_SYMBOLS = {
@@ -61,6 +62,7 @@ Respond ONLY with a valid JSON object matching this schema:
   "customer": "Customer Name",
   "email": "customer@example.com",
   "currency": "USD",
+  "due_date": "YYYY-MM-DD",
   "items": [
     {{
       "description": "Item description",
@@ -101,6 +103,7 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
       - Customer name
       - Customer email
       - Currency (with single-currency-per-invoice validation)
+      - Due date (explicit dates or relative offsets like 'due in 15 days')
       - Line items (description, quantity, unit price, line total)
       - Grand total (using decimal-safe arithmetic)
       - Missing fields checklist for user clarification
@@ -118,6 +121,7 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
             customer = str(llm_result.get("customer") or "").strip()
             email = str(llm_result.get("email") or "").strip()
             currency = str(llm_result.get("currency") or "USD").upper().strip()
+            due_date = str(llm_result.get("due_date") or "").strip() or None
             raw_items = llm_result.get("items") or []
 
             items = []
@@ -153,6 +157,7 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
                 "customer": customer,
                 "email": email,
                 "currency": currency,
+                "due_date": due_date,
                 "items": items,
                 "total": grand_total_float,
                 "missing_fields": missing_fields,
@@ -166,11 +171,7 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
     engine_used = "Deterministic Local NLP Parser"
     engine_badge = "⚡ Local NLP Parser (Deterministic & Instant)"
 
-    # 1. Extract email
-    email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text)
-    email = email_match.group(0) if email_match else None
-
-    # 2. Detect Currency and check for conflicts
+    # 1. Detect Currency and check for conflicts
     found_currencies = set()
     for sym, curr in CURRENCY_SYMBOLS.items():
         if sym in text:
@@ -188,40 +189,166 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
 
     currency = found_currencies.pop() if len(found_currencies) == 1 else "USD"
 
-    # 3. Extract Customer Name
-    customer = None
-    clean_for_name = text
+    # 2. Extract Customer Email
+    email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text)
+    email = email_match.group(0) if email_match else ""
+
+    working_text = text
     if email:
-        clean_for_name = clean_for_name.replace(email, "")
+        # Strip email and preceding 'email:' or ', email' cleanly
+        working_text = re.sub(r'(?:,\s*)?(?:with\s+)?email\s*[:=]?\s*' + re.escape(email), "", working_text, flags=re.IGNORECASE)
+        working_text = working_text.replace(email, "")
 
-    customer_patterns = [
-        # "Invoice for Rahul Sharma", "bill to John Doe", "customer: Acme Corp", "bill Priya Verma"
-        r'(?:invoice\s+(?:for|to)|bill(?:\s+(?:to|for))?|customer\s*:?|client\s*:?)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)',
-        # Case insensitive pattern stopping before delimiter or keyword
-        r'(?:invoice\s+(?:for|to)|bill(?:\s+(?:to|for))?|customer\s*:?|client\s*:?)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)*?)(?=\s*,\s*|\s+email|\s+with\s+email|\s+for\s+\d|\.|\:|\n|$)'
-    ]
+    # 3. Extract Due Date (Explicit or Relative)
+    due_date = None
+    today = datetime.date.today()
 
-    for pat in customer_patterns:
-        m = re.search(pat, clean_for_name, re.IGNORECASE)
-        if m:
-            cand = m.group(1).strip()
-            cand = re.sub(r'\s+(?:with|email|for|at)$', '', cand, flags=re.IGNORECASE).strip()
-            if cand.lower() not in ["an", "a", "the", "invoice", "email", "usd", "eur", "gbp", "inr"]:
-                customer = cand.title() if cand.islower() else cand
-                break
+    # Explicit due date formats: "due on 2026-11-30", "due by 2026-11-30", "due date: 2026-11-30"
+    explicit_date_pattern = re.compile(
+        r'\b(?:due(?:\s+(?:on|by|date:?|before))?|by)\s*[:=]?\s*(\d{4}-\d{2}-\d{2})\b',
+        re.IGNORECASE
+    )
+    m_exp = explicit_date_pattern.search(working_text)
+    if m_exp:
+        due_date = m_exp.group(1)
+        working_text = working_text[:m_exp.start()] + " " + working_text[m_exp.end():]
+    else:
+        # Explicit format DD/MM/YYYY or DD-MM-YYYY
+        explicit_dmy_pattern = re.compile(
+            r'\b(?:due(?:\s+(?:on|by|date:?|before))?|by)\s*[:=]?\s*(\d{2})[/-](\d{2})[/-](\d{4})\b',
+            re.IGNORECASE
+        )
+        m_dmy = explicit_dmy_pattern.search(working_text)
+        if m_dmy:
+            d, m_val, y = m_dmy.groups()
+            due_date = f"{y}-{m_val}-{d}"
+            working_text = working_text[:m_dmy.start()] + " " + working_text[m_dmy.end():]
 
-    # 4. Extract Line Items
-    proc_text = text
+    # Relative due date formats: "due in 15 days", "net 30", "due in 2 weeks"
+    if not due_date:
+        rel_days_pattern = re.compile(
+            r'\b(?:due\s+in\s+(\d+)\s+days?|net\s*(\d+))\b',
+            re.IGNORECASE
+        )
+        m_rel = rel_days_pattern.search(working_text)
+        if m_rel:
+            days = int(m_rel.group(1) or m_rel.group(2))
+            due_date = (today + datetime.timedelta(days=days)).isoformat()
+            working_text = working_text[:m_rel.start()] + " " + working_text[m_rel.end():]
+
+    if not due_date:
+        rel_weeks_pattern = re.compile(
+            r'\b(?:due\s+in\s+(\d+)\s+weeks?|due\s+in\s+a\s+week)\b',
+            re.IGNORECASE
+        )
+        m_w = rel_weeks_pattern.search(working_text)
+        if m_w:
+            weeks = int(m_w.group(1)) if m_w.group(1) else 1
+            due_date = (today + datetime.timedelta(days=weeks * 7)).isoformat()
+            working_text = working_text[:m_w.start()] + " " + working_text[m_w.end():]
+
+    if not due_date:
+        rel_months_pattern = re.compile(
+            r'\b(?:due\s+in\s+(\d+)\s+months?|due\s+in\s+a\s+month)\b',
+            re.IGNORECASE
+        )
+        m_m = rel_months_pattern.search(working_text)
+        if m_m:
+            months = int(m_m.group(1)) if m_m.group(1) else 1
+            due_date = (today + datetime.timedelta(days=months * 30)).isoformat()
+            working_text = working_text[:m_m.start()] + " " + working_text[m_m.end():]
+
+    # 4. Extract Global/Single Amount if present (e.g. "amount $500 USD", "total $750 USD", "amount EUR 300")
+    global_amount = None
+    m_amt = re.search(
+        r'\b(?:amount|total|sum)\s*(?:is|of|:)?\s*(?:[$€£₹]\s*(\d+(?:\.\d{1,2})?)|(?:USD|EUR|GBP|INR|CAD|AUD)\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*(?:USD|EUR|GBP|INR|CAD|AUD)?)\b',
+        working_text,
+        re.IGNORECASE
+    )
+    if m_amt:
+        val_str = m_amt.group(1) or m_amt.group(2) or m_amt.group(3)
+        if val_str:
+            try:
+                global_amount = float(Decimal(val_str).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+            except Exception:
+                global_amount = None
+
+    # Check for standalone price like ", $500 USD," or ", 500 USD,"
+    if global_amount is None:
+        m_std = re.search(r'(?:,\s*|\b)(?:[$€£₹]\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*(?:USD|EUR|GBP|INR|CAD|AUD))\b', working_text, re.IGNORECASE)
+        if m_std:
+            val_str = m_std.group(1) or m_std.group(2)
+            if val_str:
+                try:
+                    global_amount = float(Decimal(val_str).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                except Exception:
+                    global_amount = None
+
+    # 5. Customer & Description Separation
+    customer = ""
+    service_description = ""
+
+    # Check for two "for" clauses: e.g. "invoice for ABC Technologies for Web Development Services"
+    double_for_pattern = re.compile(
+        r'(?:invoice\s+(?:for|to)|bill(?:\s+(?:to|for))?|customer\s*:?)\s+([a-zA-Z0-9_\s&.,-]+?)\s+\bfor\b\s+([a-zA-Z0-9_\s&.,-]+?)(?=\s*,\s*|\s+amount|\s+total|\s+due|\.|\:|\n|$)',
+        re.IGNORECASE
+    )
+    m_df = double_for_pattern.search(working_text)
+    if m_df:
+        cand_cust = m_df.group(1).strip()
+        cand_desc = m_df.group(2).strip()
+        cand_cust = re.sub(r'^(?:an|a|the)\s+', '', cand_cust, flags=re.IGNORECASE).strip()
+        if len(cand_cust) > 1 and cand_cust.lower() not in ["an", "a", "the", "invoice", "email"]:
+            customer = cand_cust
+            service_description = cand_desc
+    else:
+        # Check for comma-separated customer and description: "invoice for ABC Technologies, website development, $500"
+        comma_sep_pattern = re.compile(
+            r'(?:invoice\s+(?:for|to)|bill(?:\s+(?:to|for))?|customer\s*:?)\s+([a-zA-Z0-9_\s&.-]+?)\s*,\s*([a-zA-Z0-9_\s&.-]+?)(?=\s*,\s*|\s+amount|\s+total|\s+due|\$|€|£|₹|\d|\.|\:|\n|$)',
+            re.IGNORECASE
+        )
+        m_cs = comma_sep_pattern.search(working_text)
+        if m_cs:
+            cand_cust = m_cs.group(1).strip()
+            cand_desc = m_cs.group(2).strip()
+            if not re.match(r'^(?:\d+|amount|total|email|due)', cand_desc, re.IGNORECASE):
+                cand_cust = re.sub(r'^(?:an|a|the)\s+', '', cand_cust, flags=re.IGNORECASE).strip()
+                if len(cand_cust) > 1 and cand_cust.lower() not in ["an", "a", "the", "invoice"]:
+                    customer = cand_cust
+                    service_description = cand_desc
+
+    # If customer still not found, standard customer pattern
+    if not customer:
+        cust_pattern = re.compile(
+            r'(?:invoice\s+(?:for|to)|bill(?:\s+(?:to|for))?|customer\s*:?|client\s*:?)\s+([a-zA-Z0-9_\s&.-]+?)(?=\s*,\s*|\s+email|\s+with\s+email|\s+for\s+\d|\s+total|\s+amount|\.|\:|\n|$)',
+            re.IGNORECASE
+        )
+        m_c = cust_pattern.search(working_text)
+        if m_c:
+            cand_cust = m_c.group(1).strip()
+            cand_cust = re.sub(r'^(?:an|a|the)\s+', '', cand_cust, flags=re.IGNORECASE).strip()
+            cand_cust = re.sub(r'\s+(?:with|email|for|at|amount|total)$', '', cand_cust, flags=re.IGNORECASE).strip()
+            if len(cand_cust) > 1 and cand_cust.lower() not in ["an", "a", "the", "invoice", "email", "usd", "eur", "gbp", "inr"]:
+                customer = cand_cust
+
+    # Clean customer name casing and punctuation
+    if customer:
+        customer = re.sub(r'[,:\s]+$', '', customer).strip()
+        if customer.islower():
+            customer = customer.title()
+
+    # 6. Extract Line Items
+    proc_text = working_text
     for word, val in NUMBER_WORDS.items():
         proc_text = re.sub(r'\b' + word + r'\s+([a-zA-Z])', f'{val} \\1', proc_text, flags=re.IGNORECASE)
 
-    # Patterns with quantity: "2 keyboards at $25 each", "2x keyboards for $25"
+    items = []
+
+    # Pattern A: Quantity with explicit price: "2 website designs at $100 each", "2 keyboards at $25"
     pat_with_qty = re.compile(
         r'(?<![$€£₹])\b(\d+)\s*(?:x\s*)?\b\s+([a-zA-Z0-9\s\-_/]+?)\s+(?:at|@|costing|priced\s+at|(?:for\s*(?:[$€£₹]|USD|EUR|GBP|INR|CAD|AUD)))\s*(?:[$€£₹]|USD|EUR|GBP|INR|CAD|AUD)?\s*(\d+(?:\.\d{1,2})?)(?:\s*(?:each|\/hr|\/unit|\/item|per\s+[a-zA-Z]+))?',
         re.IGNORECASE
     )
-
-    items = []
     for match in pat_with_qty.finditer(proc_text):
         qty_str, desc, price_str = match.groups()
         try:
@@ -232,7 +359,7 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
         clean_desc = desc.strip()
         clean_desc = re.sub(r'^(?:and|for|with|,|\.)\s+', '', clean_desc, flags=re.IGNORECASE).strip()
 
-        if "@" in clean_desc:
+        if "@" in clean_desc or clean_desc.lower() in ["days", "day", "weeks", "week", "months", "month"]:
             continue
 
         try:
@@ -242,7 +369,6 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
             price = 0.0
 
         line_total_dec = (Decimal(str(qty)) * Decimal(str(price))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
         items.append({
             "description": clean_desc,
             "quantity": qty,
@@ -250,7 +376,7 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
             "total": float(line_total_dec)
         })
 
-    # If no items found with explicit quantity, attempt clause splitting (<description> at <price>)
+    # Pattern B: Clause with description at price (no explicit quantity, default qty=1)
     if not items:
         clauses = re.split(r'\band\b|,|;|\n', proc_text)
         pat_no_qty = re.compile(
@@ -260,18 +386,16 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
         for clause in clauses:
             if "@" in clause:
                 continue
-
             m = pat_no_qty.search(clause)
             if m:
                 desc, price_str = m.groups()
                 clean_desc = re.sub(r'^(?:and|for|with|,|\.|invoice|bill|create)\s+', '', desc.strip(), flags=re.IGNORECASE).strip()
-                if clean_desc and clean_desc.lower() not in ["email", "usd", "eur", "gbp", "inr", "invoice"] and "@" not in clean_desc:
+                if clean_desc and clean_desc.lower() not in ["email", "usd", "eur", "gbp", "inr", "invoice", "days", "day"] and "@" not in clean_desc:
                     try:
                         price_dec = Decimal(price_str).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                         price = float(price_dec)
                     except Exception:
                         price = 0.0
-
                     items.append({
                         "description": clean_desc,
                         "quantity": 1,
@@ -279,7 +403,24 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
                         "total": price
                     })
 
-    # If still no items found, look for items that have quantities but missing prices (e.g. "for 2 monitors")
+    # Pattern C: If we have an extracted service_description or global_amount
+    if not items and (service_description or global_amount is not None):
+        desc = service_description if service_description else "Services"
+        desc = re.sub(r'\b(?:amount|total|sum|for|due)\b.*', '', desc, flags=re.IGNORECASE).strip()
+        desc = re.sub(r'^(?:and|for|with|,|\.)\s+', '', desc, flags=re.IGNORECASE).strip()
+        if not desc:
+            desc = "Services"
+
+        price = global_amount if global_amount is not None else None
+        tot = global_amount if global_amount is not None else 0.0
+        items.append({
+            "description": desc,
+            "quantity": 1,
+            "price": price,
+            "total": tot
+        })
+
+    # Pattern D: Fallback for items with quantity but missing price (e.g. "for 2 monitors")
     if not items:
         no_price_pattern = re.compile(r'(?<![$€£₹])\b(\d+)\b\s+([a-zA-Z0-9\s\-_/]+?)(?:and|,|\.|$)', re.IGNORECASE)
         sub_text = proc_text
@@ -291,7 +432,10 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
         for match in no_price_pattern.finditer(sub_text):
             qty_str, desc = match.groups()
             clean_desc = re.sub(r'^(?:and|for|with|,|\.|invoice|bill|create)\s+', '', desc.strip(), flags=re.IGNORECASE).strip()
-            if len(clean_desc) > 1 and clean_desc.lower() not in ["email", "usd", "eur", "gbp", "inr", "at", "each", "invoice", "details"] and "@" not in clean_desc:
+            # Exclude time units from being interpreted as line items
+            if (len(clean_desc) > 1 and 
+                clean_desc.lower() not in ["email", "usd", "eur", "gbp", "inr", "at", "each", "invoice", "details", "days", "day", "weeks", "week", "months", "month"] and 
+                "@" not in clean_desc):
                 items.append({
                     "description": clean_desc,
                     "quantity": max(1, int(qty_str)),
@@ -299,7 +443,16 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
                     "total": 0.0
                 })
 
-    # 5. Missing fields checklist
+    # Pattern E: If still no items, check for "for <description>" missing price
+    if not items and service_description:
+        items.append({
+            "description": service_description,
+            "quantity": 1,
+            "price": None,
+            "total": 0.0
+        })
+
+    # 7. Missing fields checklist
     missing_fields = []
     if not customer:
         missing_fields.append("Customer name is missing.")
@@ -314,7 +467,7 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
             elif it["price"] <= 0:
                 missing_fields.append(f"Price must be greater than zero for item {idx} ('{it['description']}').")
 
-    # 6. Grand total calculation using Decimal
+    # 8. Grand total calculation using Decimal
     grand_total = Decimal("0.00")
     for it in items:
         if it.get("total"):
@@ -325,6 +478,7 @@ def parse_natural_language_invoice(prompt: str, try_llm: bool = False) -> dict:
         "customer": customer or "",
         "email": email or "",
         "currency": currency,
+        "due_date": due_date,
         "items": items,
         "total": grand_total_float,
         "missing_fields": missing_fields,

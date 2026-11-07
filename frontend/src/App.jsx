@@ -88,6 +88,53 @@ function App() {
     return "Overview";
   });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [previousPage, setPreviousPage] = useState("Overview");
+
+  function navigateTo(newPage, options = {}) {
+    if (page !== newPage) {
+      setPreviousPage(page);
+      setPage(newPage);
+    }
+    if (options.customerId !== undefined) {
+      setViewingCustomerId(options.customerId);
+    } else if (newPage !== "Customers") {
+      setViewingCustomerId(null);
+    }
+    setMobileMenuOpen(false);
+
+    try {
+      const currentParams = new URLSearchParams(window.location.search);
+      currentParams.set("page", newPage);
+      if (options.customerId) {
+        currentParams.set("customer", options.customerId);
+      } else {
+        currentParams.delete("customer");
+      }
+      const newUrl = `${window.location.pathname}?${currentParams.toString()}`;
+      if (options.replace) {
+        window.history.replaceState({ page: newPage, customerId: options.customerId || null }, "", newUrl);
+      } else {
+        window.history.pushState({ page: newPage, customerId: options.customerId || null }, "", newUrl);
+      }
+    } catch (e) {}
+  }
+
+  function handleBack() {
+    if (viewingCustomerId) {
+      setViewingCustomerId(null);
+      navigateTo("Customers", { replace: true });
+      return;
+    }
+    if (page === "Create Invoice") {
+      navigateTo(previousPage || "Invoices");
+      return;
+    }
+    if (window.history.length > 1) {
+      window.history.back();
+    } else {
+      navigateTo("Overview");
+    }
+  }
   const [systemHealth, setSystemHealth] = useState({
     paypal_configured: false,
     paypal_mode: "sandbox",
@@ -180,6 +227,27 @@ useEffect(() => {
   loadReportsAnalytics("all", "all");
   handlePaymentReturn();
   loadHealthStatus();
+
+  function handlePopState(e) {
+    try {
+      const qp = new URLSearchParams(window.location.search).get("page");
+      const custId = new URLSearchParams(window.location.search).get("customer");
+      let target = "Overview";
+      if (qp) {
+        const found = ["Overview", "Invoices", "Payments", "Customers", "AI Copilot", "Reports", "Settings", "Create Invoice"].find(
+          p => p.toLowerCase() === qp.toLowerCase() || p.toLowerCase().replace(/\s+/g, "") === qp.toLowerCase().replace(/\s+/g, "")
+        );
+        if (found) target = found;
+      } else if (e.state && e.state.page) {
+        target = e.state.page;
+      }
+      setPage(target);
+      setViewingCustomerId(custId ? (parseInt(custId, 10) || custId) : null);
+    } catch (err) {}
+  }
+
+  window.addEventListener("popstate", handlePopState);
+  return () => window.removeEventListener("popstate", handlePopState);
 }, []);
 
   async function loadHealthStatus() {
@@ -702,7 +770,9 @@ async function deleteInvoice(invoiceId) {
     setCustomer(targetCustomer);
     setEmail(targetEmail);
     setInvoiceCurrency(targetCurrency);
-    if (!dueDate) {
+    if (aiResult.due_date) {
+      setDueDate(aiResult.due_date);
+    } else if (!dueDate) {
       setDueDate(getDefaultDueDate(30));
     }
     setItems(validItems);
@@ -1036,6 +1106,15 @@ async function deleteInvoice(invoiceId) {
                       <option value="AUD">AUD ($)</option>
                     </select>
                   </div>
+
+                  <div className="ai-preview-field">
+                    <label>Due Date</label>
+                    <input
+                      type="date"
+                      value={aiResult.due_date || ""}
+                      onChange={e => updatePreviewField("due_date", e.target.value)}
+                    />
+                  </div>
                 </div>
 
                 <div className="ai-preview-items-section">
@@ -1164,7 +1243,7 @@ async function deleteInvoice(invoiceId) {
                           total: Math.round(calculatedTotal * 100) / 100,
                           status: "Draft",
                           currency: aiResult.currency || "USD",
-                          due_date: getDefaultDueDate(30)
+                          due_date: aiResult.due_date || getDefaultDueDate(30)
                         };
                         const resp = await fetch("http://127.0.0.1:8000/api/invoices", {
                           method: "POST",
@@ -1554,6 +1633,7 @@ function openCreateInvoice(preselectedCustomer = null) {
   setDueDate(getDefaultDueDate(Number(appSettings.default_due_days || 30)));
   setItems([{ description: "", quantity: 1, price: 0 }]);
   setInvoiceNumber(generateNextInvoiceId(savedInvoices));
+  setPreviousPage(page);
   setPage("Create Invoice");
 }
 
@@ -1873,7 +1953,7 @@ async function loadInvoices() {
               <button
                 key={item}
                 className={page === item ? "nav-link active" : "nav-link"}
-                onClick={() => { setPage(item); setMobileMenuOpen(false); }}
+                onClick={() => navigateTo(item)}
               >
                 {navIcons[item]}
                 <span>{item}</span>
@@ -2516,7 +2596,7 @@ async function loadInvoices() {
                 <h1>Create new invoice</h1>
                 <p className="page-subtitle">Add customer and service details.</p>
               </div>
-              <button className="period-btn" onClick={() => setPage("Invoices")}>← Back to invoices</button>
+              <button className="period-btn" onClick={handleBack}>← Back to {previousPage === "Customers" ? "Customer" : (previousPage || "Invoices")}</button>
             </header>
 
 {renderAIGenerator()}
