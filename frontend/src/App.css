@@ -1010,6 +1010,26 @@ a {
   border-color: rgba(255, 255, 255, 0.12) !important;
 }
 
+/* Multi-currency subcard visibility override inside hero ledger cards */
+.card-figure .currency-subcard .currency-amt,
+.hero-ledger-card .currency-subcard .currency-amt {
+  color: #0f172a !important;
+  font-size: 16px !important;
+  font-weight: 700 !important;
+}
+
+.hero-ledger-card.has-overdue .currency-subcard .currency-amt {
+  color: #dc2626 !important;
+}
+
+.card-figure .currency-subcard .currency-badge,
+.hero-ledger-card .currency-subcard .currency-badge {
+  color: #1e293b !important;
+  background: #e2e8f0 !important;
+  border: 1px solid #cbd5e1 !important;
+  font-weight: 700 !important;
+}
+
 .card-sub {
   font-size: 11px;
   color: #64748b;
