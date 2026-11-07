@@ -8,7 +8,8 @@ import sqlite3
 import secrets
 import re
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, Request, Body, Query
+import urllib.parse
 import csv
 import io
 from fastapi.middleware.cors import CORSMiddleware
@@ -71,6 +72,27 @@ except ValueError:
     PAYPAL_API_BASE = None
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5174")
+
+
+def validate_frontend_origin(candidate: str | None) -> str:
+    """
+    Validates and normalizes candidate frontend origin.
+    Prevents open redirect attacks by strictly allowing only localhost or 127.0.0.1 origins
+    on valid ports. Falls back safely to FRONTEND_URL or http://localhost:5174.
+    """
+    fallback = os.getenv("FRONTEND_URL", "http://localhost:5174").rstrip("/")
+    if not candidate or not isinstance(candidate, str):
+        return fallback
+
+    try:
+        parsed = urllib.parse.urlsplit(candidate.strip())
+        if parsed.scheme in ("http", "https") and parsed.hostname in ("localhost", "127.0.0.1"):
+            port_part = f":{parsed.port}" if parsed.port else ""
+            return f"{parsed.scheme}://{parsed.hostname}{port_part}"
+    except Exception:
+        pass
+
+    return fallback
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE = os.path.join(BASE_DIR, "paypilot.db")
@@ -337,6 +359,10 @@ class InvoiceRequest(BaseModel):
     paid_at: str | None = None
 
 
+class CreateOrderRequest(BaseModel):
+    origin: str | None = None
+
+
 class CapturePaymentRequest(BaseModel):
     order_id: str
     invoice_id: str
@@ -397,6 +423,8 @@ allow_origins=[
     "http://127.0.0.1:5174",
     "http://localhost:5175",
     "http://127.0.0.1:5175",
+    "http://localhost:5176",
+    "http://127.0.0.1:5176",
 ],
 
     allow_credentials=True,
@@ -753,7 +781,12 @@ def get_paypal_access_token():
 
 
 @app.post("/api/payments/create-order/{invoice_id}")
-def create_paypal_order(invoice_id: str):
+def create_paypal_order(
+    invoice_id: str,
+    payload: CreateOrderRequest | None = None,
+    request: Request = None,
+    origin: str | None = None
+):
     connection = get_connection()
     row = connection.execute(
         "SELECT * FROM invoices WHERE id = ?", (invoice_id,)
@@ -779,8 +812,21 @@ def create_paypal_order(invoice_id: str):
         connection.close()
         raise
 
-    return_url = f"{FRONTEND_URL}/?payment=success&invoiceId={invoice_id}"
-    cancel_url = f"{FRONTEND_URL}/?payment=cancel&invoiceId={invoice_id}"
+    # Dynamically resolve safe frontend origin for return and cancel redirects
+    raw_origin = None
+    if payload and payload.origin:
+        raw_origin = payload.origin
+    elif origin:
+        raw_origin = origin
+    elif request:
+        try:
+            raw_origin = request.headers.get("origin") or request.headers.get("referer")
+        except Exception:
+            raw_origin = None
+
+    target_frontend = validate_frontend_origin(raw_origin)
+    return_url = f"{target_frontend}/?payment=success&invoiceId={invoice_id}"
+    cancel_url = f"{target_frontend}/?payment=cancel&invoiceId={invoice_id}"
 
     invoice_currency = row["currency"] if "currency" in row.keys() and row["currency"] else "USD"
 

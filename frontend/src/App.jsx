@@ -601,7 +601,9 @@ useEffect(() => {
     setPaymentLoading(true);
     try {
       const response = await fetch(`http://127.0.0.1:8000/api/payments/create-order/${invoice.id}`, {
-        method: "POST"
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ origin: window.location.origin })
       });
 
       const data = await response.json();
