@@ -10,6 +10,7 @@ import re
 
 from fastapi import FastAPI, HTTPException, Response, Request, Body, Query
 import urllib.parse
+import ipaddress
 import csv
 import io
 from fastapi.middleware.cors import CORSMiddleware
@@ -74,10 +75,28 @@ except ValueError:
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5174")
 
 
+def is_safe_frontend_host(hostname: str | None) -> bool:
+    """
+    Checks if a hostname is a safe local development or private LAN host.
+    Blocks all external/public internet domains and malicious origins.
+    """
+    if not hostname or not isinstance(hostname, str):
+        return False
+    h = hostname.strip().lower()
+    if h in ("localhost", "127.0.0.1", "::1"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        return False
+
+
 def validate_frontend_origin(candidate: str | None) -> str:
     """
     Validates and normalizes candidate frontend origin.
-    Prevents open redirect attacks by strictly allowing only localhost or 127.0.0.1 origins
+    Prevents open redirect attacks by strictly allowing only localhost, 127.0.0.1,
+    or private local LAN IP origins (e.g. 10.118.29.99, 192.168.x.x, 172.16-31.x.x)
     on valid ports. Falls back safely to FRONTEND_URL or http://localhost:5174.
     """
     fallback = os.getenv("FRONTEND_URL", "http://localhost:5174").rstrip("/")
@@ -86,7 +105,7 @@ def validate_frontend_origin(candidate: str | None) -> str:
 
     try:
         parsed = urllib.parse.urlsplit(candidate.strip())
-        if parsed.scheme in ("http", "https") and parsed.hostname in ("localhost", "127.0.0.1"):
+        if parsed.scheme in ("http", "https") and is_safe_frontend_host(parsed.hostname):
             port_part = f":{parsed.port}" if parsed.port else ""
             return f"{parsed.scheme}://{parsed.hostname}{port_part}"
     except Exception:
@@ -425,7 +444,12 @@ allow_origins=[
     "http://127.0.0.1:5175",
     "http://localhost:5176",
     "http://127.0.0.1:5176",
+    "http://10.118.29.99:5173",
+    "http://10.118.29.99:5174",
+    "http://10.118.29.99:5175",
+    "http://10.118.29.99:5176",
 ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$",
 
     allow_credentials=True,
     allow_methods=["*"],
@@ -2138,3 +2162,7 @@ def update_settings(data: SettingsUpdateRequest):
     connection.close()
 
     return get_settings()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

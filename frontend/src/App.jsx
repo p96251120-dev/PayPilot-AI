@@ -33,6 +33,23 @@ import {
   IconChevronDown
 } from "./Icons";
 
+// Dynamic API Base URL resolution for local desktop & LAN network access
+export const getApiBaseUrl = () => {
+  if (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL.replace(/\/$/, "");
+  }
+  if (typeof window !== "undefined" && window.location && window.location.hostname) {
+    const hostname = window.location.hostname;
+    if (hostname === "localhost" || hostname === "127.0.0.1") {
+      return "http://127.0.0.1:8000";
+    }
+    return `http://${hostname}:8000`;
+  }
+  return "http://127.0.0.1:8000";
+};
+
+export const API_BASE_URL = getApiBaseUrl();
+
 function getTodayDateString() {
   const now = new Date();
   const year = now.getFullYear();
@@ -252,7 +269,7 @@ useEffect(() => {
 
   async function loadHealthStatus() {
     try {
-      const resp = await fetch("http://127.0.0.1:8000/health");
+      const resp = await fetch(`${API_BASE_URL}/health`);
       if (resp.ok) {
         const data = await resp.json();
         setSystemHealth(data);
@@ -303,7 +320,7 @@ useEffect(() => {
     if (curr && curr !== "all") params.append("currency", curr);
 
     try {
-      const url = `http://127.0.0.1:8000/api/reports/analytics?${params.toString()}`;
+      const url = `${API_BASE_URL}/api/reports/analytics?${params.toString()}`;
       const response = await fetch(url);
       if (!response.ok) {
         throw new Error(`Failed to load reports: ${response.statusText}`);
@@ -341,13 +358,13 @@ useEffect(() => {
       params.append("currency", reportsCurrencyFilter);
     }
 
-    window.open(`http://127.0.0.1:8000/api/reports/export-csv?${params.toString()}`, "_blank");
+    window.open(`${API_BASE_URL}/api/reports/export-csv?${params.toString()}`, "_blank");
   }
 
   async function loadAppSettings() {
     setSettingsLoading(true);
     try {
-      const resp = await fetch("http://127.0.0.1:8000/api/settings");
+      const resp = await fetch(`${API_BASE_URL}/api/settings`);
       if (resp.ok) {
         const data = await resp.json();
         setAppSettings(data);
@@ -368,7 +385,7 @@ useEffect(() => {
     setSettingsErrorMsg("");
 
     try {
-      const resp = await fetch("http://127.0.0.1:8000/api/settings", {
+      const resp = await fetch(`${API_BASE_URL}/api/settings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(appSettings)
@@ -391,7 +408,7 @@ useEffect(() => {
     setCustomersLoading(true);
     setCustomersError("");
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/customers");
+      const response = await fetch(`${API_BASE_URL}/api/customers`);
       if (!response.ok) {
         throw new Error(`Failed to load customers: ${response.statusText}`);
       }
@@ -446,8 +463,8 @@ useEffect(() => {
 
     const isEdit = Boolean(editingCustomer);
     const url = isEdit
-      ? `http://127.0.0.1:8000/api/customers/${editingCustomer.id}`
-      : "http://127.0.0.1:8000/api/customers";
+      ? `${API_BASE_URL}/api/customers/${editingCustomer.id}`
+      : `${API_BASE_URL}/api/customers`;
     const method = isEdit ? "PUT" : "POST";
 
     try {
@@ -482,7 +499,7 @@ useEffect(() => {
     if (!confirmDelete) return;
 
     try {
-      const response = await fetch(`http://127.0.0.1:8000/api/customers/${cust.id}`, {
+      const response = await fetch(`${API_BASE_URL}/api/customers/${cust.id}`, {
         method: "DELETE"
       });
       const data = await response.json();
@@ -503,7 +520,7 @@ useEffect(() => {
     setPaymentsLoading(true);
     setPaymentsError("");
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/payments");
+      const response = await fetch(`${API_BASE_URL}/api/payments`);
       if (!response.ok) {
         throw new Error(`Failed to load payments: ${response.statusText}`);
       }
@@ -537,7 +554,7 @@ useEffect(() => {
       });
 
       try {
-        const response = await fetch("http://127.0.0.1:8000/api/payments/capture-order", {
+        const response = await fetch(`${API_BASE_URL}/api/payments/capture-order`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
@@ -571,7 +588,7 @@ useEffect(() => {
       }
     } else if (paymentStatus === "cancel") {
       if (invoiceId) {
-        fetch("http://127.0.0.1:8000/api/payments/record-cancel", {
+        fetch(`${API_BASE_URL}/api/payments/record-cancel`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ invoice_id: invoiceId, order_id: orderId || null })
@@ -600,7 +617,7 @@ useEffect(() => {
 
     setPaymentLoading(true);
     try {
-      const response = await fetch(`http://127.0.0.1:8000/api/payments/create-order/${invoice.id}`, {
+      const response = await fetch(`${API_BASE_URL}/api/payments/create-order/${invoice.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ origin: window.location.origin })
@@ -631,7 +648,7 @@ async function deleteInvoice(invoiceId) {
 
   try {
     const response = await fetch(
-      `http://127.0.0.1:8000/api/invoices/${invoiceId}`,
+      `${API_BASE_URL}/api/invoices/${invoiceId}`,
       {
         method: "DELETE"
       }
@@ -680,7 +697,7 @@ async function deleteInvoice(invoiceId) {
     setAiSuccessMessage("");
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/ai/generate-invoice", {
+      const response = await fetch(`${API_BASE_URL}/api/ai/generate-invoice`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -813,7 +830,7 @@ async function deleteInvoice(invoiceId) {
     setCopilotError("");
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/ai/copilot", {
+      const response = await fetch(`${API_BASE_URL}/api/ai/copilot`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: q })
@@ -1247,7 +1264,7 @@ async function deleteInvoice(invoiceId) {
                           currency: aiResult.currency || "USD",
                           due_date: aiResult.due_date || getDefaultDueDate(30)
                         };
-                        const resp = await fetch("http://127.0.0.1:8000/api/invoices", {
+                        const resp = await fetch(`${API_BASE_URL}/api/invoices`, {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify(newInvoice)
@@ -1294,7 +1311,7 @@ async function deleteInvoice(invoiceId) {
 
   try {
     const response = await fetch(
-      "http://127.0.0.1:8000/api/products/search",
+      `${API_BASE_URL}/api/products/search`,
       {
         method: "POST",
         headers: {
@@ -1694,8 +1711,8 @@ async function createInvoice(e) {
   try {
     const response = await fetch(
       editingInvoiceId
-        ? `http://127.0.0.1:8000/api/invoices/${editingInvoiceId}`
-        : "http://127.0.0.1:8000/api/invoices",
+        ? `${API_BASE_URL}/api/invoices/${editingInvoiceId}`
+        : `${API_BASE_URL}/api/invoices`,
       {
         method: editingInvoiceId ? "PUT" : "POST",
         headers: {
@@ -1738,7 +1755,7 @@ async function loadInvoices() {
   setInvoicesError("");
   try {
     const response = await fetch(
-      "http://127.0.0.1:8000/api/invoices"
+      `${API_BASE_URL}/api/invoices`
     );
 
     if (!response.ok) {
@@ -2552,36 +2569,38 @@ async function loadInvoices() {
                         )}
                       </div>
 
-                      {invoice.status !== "Paid" ? (
+                      <div className="invoice-row-actions">
+                        {invoice.status !== "Paid" ? (
+                          <button
+                            onClick={() => initiatePayPalCheckout(invoice)}
+                            className="paypal-button"
+                            disabled={paymentLoading}
+                            title="Pay this invoice via PayPal Sandbox"
+                          >
+                            {paymentLoading ? "Connecting..." : "Pay with PayPal"}
+                          </button>
+                        ) : (
+                          <span className="paid-tag" title={invoice.paypal_capture_id ? `Capture Ref: ${invoice.paypal_capture_id}` : "Paid"}>
+                            <IconCheck width={12} height={12} style={{ display: "inline-block", verticalAlign: "middle", marginRight: "4px" }} /> Paid
+                          </span>
+                        )}
+
                         <button
-                          onClick={() => initiatePayPalCheckout(invoice)}
-                          className="paypal-button"
-                          disabled={paymentLoading}
-                          title="Pay this invoice via PayPal Sandbox"
+                          onClick={() => editInvoice(invoice)}
+                          className="edit-button"
+                          disabled={invoice.status === "Paid"}
+                          title={invoice.status === "Paid" ? "Paid invoices cannot be edited" : "Edit invoice"}
                         >
-                          {paymentLoading ? "Connecting..." : "Pay with PayPal"}
+                          Edit
                         </button>
-                      ) : (
-                        <span className="paid-tag" title={invoice.paypal_capture_id ? `Capture Ref: ${invoice.paypal_capture_id}` : "Paid"}>
-                          <IconCheck width={12} height={12} style={{ display: "inline-block", verticalAlign: "middle", marginRight: "4px" }} /> Paid
-                        </span>
-                      )}
 
-                      <button
-                        onClick={() => editInvoice(invoice)}
-                        className="edit-button"
-                        disabled={invoice.status === "Paid"}
-                        title={invoice.status === "Paid" ? "Paid invoices cannot be edited" : "Edit invoice"}
-                      >
-                        Edit
-                      </button>
-
-                      <button
-                        onClick={() => deleteInvoice(invoice.id)}
-                        className="delete-button"
-                      >
-                        Delete
-                      </button>
+                        <button
+                          onClick={() => deleteInvoice(invoice.id)}
+                          className="delete-button"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </div>
                   );
                 })
