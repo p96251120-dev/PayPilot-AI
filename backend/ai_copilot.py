@@ -43,12 +43,15 @@ def detect_query_intent(query: str) -> tuple[str, dict]:
     Classifies the user query into a business intent with extracted parameters.
     """
     q = (query or "").lower().strip()
+    if not q:
+        return "empty", {}
     
     # 1. Invoice Drafting Intent
     invoice_draft_patterns = [
         r'\b(?:create|draft|generate|make|issue|new)\s+(?:an?\s+)?invoice\b',
-        r'\bbill\s+[a-zA-Z]+\s+(?:for|email|\$|€|£|₹|\d)',
-        r'\binvoice\s+for\s+[a-zA-Z]+'
+        r'\b(?:bill|charge)\s+[a-zA-Z0-9_\s]+?\s*(?:for|\$|€|£|₹|\b\d+\b)',
+        r'\binvoice\s+(?:for|to)\s+[a-zA-Z]+',
+        r'\b(?:create|draft)\s+[a-zA-Z0-9_\s]+?\s+invoice\b'
     ]
     for pattern in invoice_draft_patterns:
         if re.search(pattern, q):
@@ -75,41 +78,46 @@ def detect_query_intent(query: str) -> tuple[str, dict]:
     if any(k in q for k in monthly_keywords):
         return "monthly_summary", {}
 
-    # 5. Customers with pending / unpaid invoices (higher priority than general revenue)
-    pending_cust_keywords = [
-        "who owes", "pending customer", "pending clients", "customers with pending",
-        "unpaid customer", "unpaid client", "who hasn't paid", "unsettled customer",
-        "outstanding customer", "which customers", "customers who", "pending invoices"
-    ]
-    if any(k in q for k in pending_cust_keywords) and ("customer" in q or "client" in q or "who" in q):
-        return "pending_customers", {}
-
-    # 6. Specific Customer Profile lookup
-    cust_match = re.search(r'(?:about|for|customer|client)\s+([a-zA-Z0-9_\.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+|[a-zA-Z]+(?:\s+[a-zA-Z]+)?)', q)
-    if cust_match:
-        cand = cust_match.group(1).strip()
-        stop_words = ["an", "a", "the", "invoice", "payment", "revenue", "money", "pending", "paid", "overdue", "all", "customers", "clients"]
-        if cand.lower() not in stop_words and len(cand) > 2:
-            return "customer_lookup", {"customer_term": cand}
-
-    # 7. Total revenue / Paid, Pending, Overdue breakdown (combines multiple statuses)
-    if ("total" in q or "revenue" in q or "breakdown" in q or "summary" in q or "portfolio" in q) and ("paid" in q or "pending" in q or "overdue" in q or "all" in q):
-        return "revenue_overview", {}
-
-    # 8. Overdue Invoices (specific inquiry strictly about overdue)
+    # 5. Overdue / Delinquent Invoices (specific inquiry about overdue)
     overdue_keywords = ["overdue", "late", "past due", "delinquent", "behind schedule"]
     if any(k in q for k in overdue_keywords):
+        # If user asks for comprehensive breakdown/overview across categories
+        if any(w in q for w in ["breakdown", "overview", "summary", "total"]) and any(w in q for w in ["paid", "pending", "all"]):
+            return "revenue_overview", {}
         return "overdue_invoices", {}
 
-    # 9. General revenue / financial health
-    revenue_keywords = [
-        "total revenue", "total paid", "how much money", "revenue summary",
-        "portfolio", "receivables", "how much paid", "financial summary",
-        "earnings", "collections", "cash flow", "overview"
+    # 6. Pending / Unpaid Invoices & Customers
+    pending_phrases = [
+        "who owes", "pending customer", "pending clients", "customers with pending",
+        "unpaid customer", "unpaid client", "who hasn't paid", "unsettled customer",
+        "outstanding customer", "which customers", "customers who", "pending invoices",
+        "unpaid invoices", "pending invoice", "unpaid invoice", "show pending", "show unpaid",
+        "invoices are pending", "invoices are unpaid", "invoices pending", "invoices unpaid",
+        "unpaid balances", "pending checkout"
     ]
-    if any(k in q for k in revenue_keywords):
-        return "revenue_overview", {}
+    if any(k in q for k in pending_phrases):
+        return "pending_customers", {}
 
+    # 7. Customer Profile lookup by email
+    email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', q)
+    if email_match:
+        return "customer_lookup", {"customer_term": email_match.group(0)}
+
+    # 8. Customer Profile lookup by prefix
+    cust_match = re.search(r'(?:about|for|customer|client|who is|find|search)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)?)', q)
+    if cust_match:
+        cand = cust_match.group(1).strip()
+        stop_words = ["an", "a", "the", "invoice", "payment", "revenue", "money", "pending", "paid", "overdue", "all", "customers", "clients", "me", "us", "summary", "reports", "my", "our"]
+        if cand.lower() not in stop_words and len(cand) > 1:
+            return "customer_lookup", {"customer_term": cand}
+
+    # 9. Short direct customer name (e.g. "Rahul", "Amit", "Test Customer")
+    financial_words = {"revenue", "total", "summary", "monthly", "overdue", "pending", "paid", "invoice", "invoices", "payment", "payments", "help", "action", "next", "what", "how", "show", "tell", "draft", "create", "bill", "all", "status", "list"}
+    words = [w for w in re.findall(r'[a-zA-Z]+', q) if len(w) > 1]
+    if 1 <= len(words) <= 3 and not any(w in financial_words for w in words):
+        return "customer_lookup", {"customer_term": " ".join(words)}
+
+    # 10. General Revenue / Financial Overview
     return "revenue_overview", {}
 
 
@@ -679,6 +687,8 @@ def handle_customer_lookup(conn, query: str, customer_term: str) -> dict:
     ]
 
     if not cust_invoices and not matched_cust:
+        if not re.search(r'\b(?:about|for|customer|client|who is|find|search)\b', query.lower()):
+            return handle_revenue_overview(conn, query)
         return {
             "intent": "customer_lookup",
             "title": f"Customer Lookup: {customer_term}",
