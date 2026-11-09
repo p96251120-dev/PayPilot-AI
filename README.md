@@ -39,7 +39,7 @@ Small businesses, independent consultants, and agencies face persistent operatio
 ### Invoice Management & Lifecycle Tracking
 - Full lifecycle status management: **Draft**, **Pending**, and **Paid**.
 - Multi-criteria toolbar: filter by status, search by customer/ID/email, and sort by date, due date, customer name, or value.
-- **Audit-Safe Immutability:** Once an invoice is marked `Paid`, its currency, amount, and items are locked against alteration, preserving accounting integrity.
+- **Audit-Safe Immutability:** Once an invoice is marked `Paid`, the frontend disables editing, while backend API guardrails enforce status, currency, and total amount restrictions.
 - **Deletion Protection:** Invoices with linked payment attempts cannot be deleted, ensuring permanent audit history.
 
 ### AI Natural-Language Invoice Generator
@@ -83,11 +83,11 @@ Small businesses, independent consultants, and agencies face persistent operatio
 ### Financial Reports & CSV Export
 - Interactive reporting suite with dynamic date-range filters (*All Time*, *Last 30 Days*, *Last 90 Days*, *YTD*) and currency filtering.
 - Status distribution breakdowns, monthly collection trends, and receivables aging buckets (Current, 1-30 Days Overdue, 30+ Days Overdue).
-- Downloadable audit-grade CSV export formatted for external accounting software.
+- Downloadable financial CSV export containing invoice statuses, overdue indicators, payment dates, and PayPal gateway capture references.
 
 ### Native Multi-Currency Accounting
 - Multi-currency portfolio tracking supporting **USD** and **INR** out of the box, with extensible support for **EUR**, **GBP**, and **CAD**.
-- Uses decimal arithmetic (`Decimal('0.01')`) across backend ledger calculations to prevent floating-point representation drift.
+- Uses decimal arithmetic (`Decimal('0.01')`) across payment capture verification, invoice validation, and parsing to prevent floating-point representation drift.
 
 ---
 
@@ -143,7 +143,7 @@ Verified directly from repository dependency manifests:
 ```
 
 - **Frontend (`frontend/`):** A responsive Single Page Application built on React 19. Interfaces with backend APIs via centralized, dynamic URL resolvers that adapt seamlessly across `localhost` and local network IPs.
-- **Backend (`backend/`):** REST API powered by FastAPI. Implements Pydantic validation schemas, database connection pooling with row factories, and strict error handling.
+- **Backend (`backend/`):** REST API powered by FastAPI. Implements Pydantic validation schemas, per-request SQLite connection management with dictionary-like row factories, and strict error handling.
 - **Database Layer (`backend/paypilot.db`):** SQLite database enforcing foreign key integrity (`ON DELETE RESTRICT` on payment history).
 - **Security Boundary:** Explicit sandbox enforcement ensures live PayPal endpoints are rejected at the code level.
 
