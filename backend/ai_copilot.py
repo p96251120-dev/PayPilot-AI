@@ -204,7 +204,7 @@ def handle_revenue_overview(conn, query: str) -> dict:
         total_portfolio[c] = round(total_portfolio.get(c, 0.0) + amt, 2)
 
         is_overdue = False
-        if status != "Paid" and due_str and due_str < today_str:
+        if status not in ("Paid", "Draft") and due_str and due_str < today_str:
             is_overdue = True
             overdue_count += 1
             overdue_totals[c] = round(overdue_totals.get(c, 0.0) + amt, 2)
@@ -298,7 +298,7 @@ def handle_pending_customers(conn, query: str) -> dict:
         due = inv.get("due_date")
         
         is_overdue = False
-        if status != "Paid" and due and str(due)[:10] < today_str:
+        if (status or "").capitalize() not in ("Paid", "Draft") and due and str(due)[:10] < today_str:
             is_overdue = True
 
         pending_totals[c] = round(pending_totals.get(c, 0.0) + amt, 2)
@@ -500,7 +500,7 @@ def handle_overdue_invoices(conn, query: str) -> dict:
     for inv in invoices:
         status = (inv.get("status") or "Draft").capitalize()
         due = inv.get("due_date")
-        if status != "Paid" and due:
+        if status not in ("Paid", "Draft") and due:
             due_str = str(due)[:10]
             if due_str < today_str:
                 c = (inv.get("currency") or "USD").upper().strip()
@@ -591,7 +591,7 @@ def handle_follow_up_actions(conn, query: str) -> dict:
     for inv in invoices:
         status = (inv.get("status") or "Draft").capitalize()
         due = inv.get("due_date")
-        if status != "Paid" and due:
+        if status not in ("Paid", "Draft") and due:
             due_str = str(due)[:10]
             if due_str < today_str:
                 days_over = (today_dt - datetime.strptime(due_str, "%Y-%m-%d").date()).days

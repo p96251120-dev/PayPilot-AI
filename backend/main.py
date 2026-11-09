@@ -1,5 +1,6 @@
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
+from typing import Optional
 
 import requests
 import os
@@ -638,6 +639,104 @@ def get_invoices():
         })
 
     return invoices
+
+
+# ---------------- SMART PAYMENT REMINDERS NOTIFICATIONS ----------------
+
+@app.get("/api/notifications/reminders")
+def get_payment_reminders(override_today: Optional[str] = None):
+    """
+    Returns calculated smart payment reminders:
+    1. Upcoming Due: Pending invoice due within the next 3 calendar days (1 to 3 days ahead).
+    2. Due Today: Pending invoice whose due date is today.
+    3. Overdue: Unpaid invoice whose due date has passed.
+    Draft and Paid invoices are strictly excluded.
+    """
+    today_date = date.today()
+    if override_today:
+        try:
+            today_date = datetime.strptime(override_today.strip()[:10], "%Y-%m-%d").date()
+        except Exception:
+            pass
+
+    connection = get_connection()
+    rows = connection.execute("SELECT * FROM invoices ORDER BY rowid DESC").fetchall()
+    connection.close()
+
+    reminders = []
+    seen = set()
+
+    for row in rows:
+        row_keys = row.keys()
+        status = (row["status"] or "").lower().strip()
+        # Business rule: Never generate payment reminders for Draft or Paid invoices
+        if status in ("paid", "draft"):
+            continue
+
+        due_date_str = (row["due_date"] or "").strip()[:10] if "due_date" in row_keys and row["due_date"] else None
+        if not due_date_str or len(due_date_str) != 10:
+            continue
+
+        try:
+            due_d = datetime.strptime(due_date_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+
+        diff = (due_d - today_date).days
+        category = None
+        category_label = None
+
+        if diff < 0:
+            category = "overdue"
+            category_label = "Overdue"
+        elif diff == 0:
+            category = "due_today"
+            category_label = "Due Today"
+        elif 1 <= diff <= 3:
+            category = "upcoming"
+            category_label = "Upcoming Due"
+
+        if not category:
+            continue
+
+        key = (row["id"], category)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        currency = row["currency"] if "currency" in row_keys and row["currency"] else "USD"
+        reminders.append({
+            "id": f"{row['id']}-{category}",
+            "invoice_id": row["id"],
+            "customer": row["customer"],
+            "email": row["email"],
+            "amount": float(row["total"]),
+            "currency": currency,
+            "due_date": due_date_str,
+            "days_diff": diff,
+            "category": category,
+            "category_label": category_label,
+            "status": row["status"]
+        })
+
+    # Sort: Overdue first (most overdue first), then Due Today, then Upcoming
+    def sort_key(r):
+        order = {"overdue": 0, "due_today": 1, "upcoming": 2}
+        return (order.get(r["category"], 9), r["days_diff"])
+
+    reminders.sort(key=sort_key)
+
+    overdue_count = sum(1 for r in reminders if r["category"] == "overdue")
+    due_today_count = sum(1 for r in reminders if r["category"] == "due_today")
+    upcoming_count = sum(1 for r in reminders if r["category"] == "upcoming")
+
+    return {
+        "total_count": len(reminders),
+        "overdue_count": overdue_count,
+        "due_today_count": due_today_count,
+        "upcoming_count": upcoming_count,
+        "reminders": reminders
+    }
 
 
 # ---------------- UPDATE INVOICE ----------------
@@ -1489,7 +1588,7 @@ def calculate_customer_stats(connection, customer_id: str, customer_email: str):
 
         # Overdue: unpaid and due_date < today
         is_overdue = False
-        if status_lower != "paid" and due_date and str(due_date).strip()[:10] < today_str:
+        if status_lower not in ("paid", "draft") and due_date and str(due_date).strip()[:10] < today_str:
             is_overdue = True
 
         if status_lower == "paid":
@@ -1849,7 +1948,7 @@ def get_reports_analytics(
         # Check overdue
         is_overdue = False
         due_str = str(due).strip()[:10] if due else None
-        if status != "Paid" and due_str and due_str < today_str:
+        if status not in ("Paid", "Draft") and due_str and due_str < today_str:
             is_overdue = True
 
         # Status bucket
@@ -2043,7 +2142,7 @@ def export_reports_csv(
 
         status = (inv["status"] or "Draft").capitalize()
         due_str = str(due_date).strip()[:10] if due_date else ""
-        is_overdue = "Yes" if (status != "Paid" and due_str and due_str < today_str) else "No"
+        is_overdue = "Yes" if (status not in ("Paid", "Draft") and due_str and due_str < today_str) else "No"
 
         writer.writerow([
             inv["id"],

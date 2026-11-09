@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import "./App.css";
 import {
   IconOverview,
@@ -30,7 +30,8 @@ import {
   IconShield,
   IconZap,
   IconCopy,
-  IconChevronDown
+  IconChevronDown,
+  IconBell
 } from "./Icons";
 
 // Dynamic API Base URL resolution for local desktop & LAN network access
@@ -67,10 +68,10 @@ function getDefaultDueDate(daysAhead = 30) {
   return `${year}-${month}-${day}`;
 }
 
-function isInvoiceOverdue(invoice, overrideToday = null) {
+export function isInvoiceOverdue(invoice, overrideToday = null) {
   if (!invoice || typeof invoice !== "object") return false;
   const status = (invoice.status || "").toLowerCase().trim();
-  if (status === "paid") return false;
+  if (status === "paid" || status === "draft") return false;
   if (!invoice.due_date || typeof invoice.due_date !== "string" || !invoice.due_date.trim()) {
     return false;
   }
@@ -82,6 +83,360 @@ function isInvoiceOverdue(invoice, overrideToday = null) {
     ? overrideToday.trim()
     : getTodayDateString();
   return cleanDueDate < todayStr;
+}
+
+export function formatCurrency(amount, currency = "USD") {
+  const safeCurrency = (currency || "USD").toUpperCase().trim();
+  const num = Number(amount || 0);
+
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: safeCurrency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(num);
+  } catch {
+    return `${safeCurrency} ${num.toFixed(2)}`;
+  }
+}
+
+export function getPaymentReminders(invoices = [], overrideToday = null) {
+  if (!Array.isArray(invoices)) return [];
+  const todayStr = (typeof overrideToday === "string" && /^\d{4}-\d{2}-\d{2}$/.test(overrideToday.trim()))
+    ? overrideToday.trim()
+    : getTodayDateString();
+
+  const [tY, tM, tD] = todayStr.split("-").map(Number);
+  const todayUtc = Date.UTC(tY, tM - 1, tD);
+
+  const reminders = [];
+  const seen = new Set();
+
+  for (const inv of invoices) {
+    if (!inv || typeof inv !== "object") continue;
+    const status = (inv.status || "").toLowerCase().trim();
+    // Business rule: Never generate payment reminders for Draft or Paid invoices
+    if (status === "paid" || status === "draft") continue;
+
+    const dueDateStr = (inv.due_date || "").trim().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDateStr)) continue;
+
+    const [dY, dM, dD] = dueDateStr.split("-").map(Number);
+    const dueUtc = Date.UTC(dY, dM - 1, dD);
+    const diffDays = Math.round((dueUtc - todayUtc) / (1000 * 60 * 60 * 24));
+
+    let category = null;
+    let categoryLabel = null;
+
+    if (diffDays < 0) {
+      category = "overdue";
+      categoryLabel = "Overdue";
+    } else if (diffDays === 0) {
+      category = "due_today";
+      categoryLabel = "Due Today";
+    } else if (diffDays >= 1 && diffDays <= 3) {
+      category = "upcoming";
+      categoryLabel = "Upcoming Due";
+    }
+
+    if (!category) continue;
+
+    const key = `${inv.id}-${category}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const currency = (inv.currency || "USD").toUpperCase();
+    reminders.push({
+      id: key,
+      invoice_id: inv.id,
+      customer: inv.customer || "Unknown Customer",
+      email: inv.email || "",
+      amount: Number(inv.total) || 0,
+      currency: currency,
+      due_date: dueDateStr,
+      days_diff: diffDays,
+      category: category,
+      category_label: categoryLabel,
+      status: inv.status
+    });
+  }
+
+  // Sort: Overdue first (most overdue first), then Due Today, then Upcoming (soonest first)
+  const order = { overdue: 0, due_today: 1, upcoming: 2 };
+  reminders.sort((a, b) => {
+    const catDiff = (order[a.category] ?? 9) - (order[b.category] ?? 9);
+    if (catDiff !== 0) return catDiff;
+    return a.days_diff - b.days_diff;
+  });
+
+  return reminders;
+}
+
+export function NotificationCenter({
+  reminders = [],
+  readReminderIds = [],
+  onMarkAsRead,
+  onMarkAllAsRead,
+  onOpenInvoice,
+  onViewInList,
+  isMobileHeader = false
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const wrapperRef = useRef(null);
+
+  const unreadCount = useMemo(() => {
+    return reminders.filter(r => !readReminderIds.includes(r.id)).length;
+  }, [reminders, readReminderIds]);
+
+  const overdueCount = useMemo(() => {
+    return reminders.filter(r => r.category === "overdue").length;
+  }, [reminders]);
+
+  const dueTodayCount = useMemo(() => {
+    return reminders.filter(r => r.category === "due_today").length;
+  }, [reminders]);
+
+  const upcomingCount = useMemo(() => {
+    return reminders.filter(r => r.category === "upcoming").length;
+  }, [reminders]);
+
+  const displayedReminders = useMemo(() => {
+    if (categoryFilter === "all") return reminders;
+    return reminders.filter(r => r.category === categoryFilter);
+  }, [reminders, categoryFilter]);
+
+  // Click outside listener
+  useEffect(() => {
+    if (!isOpen) return;
+    function handleClickOutside(e) {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target)) {
+        setIsOpen(false);
+      }
+    }
+    function handleKeyDown(e) {
+      if (e.key === "Escape") {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen]);
+
+  const getCategoryDetails = (reminder) => {
+    if (reminder.category === "overdue") {
+      const days = Math.abs(reminder.days_diff);
+      return {
+        badgeClass: "badge-overdue",
+        badgeText: days === 1 ? "Overdue · 1 day late" : `Overdue · ${days} days late`,
+        accentClass: "accent-overdue"
+      };
+    }
+    if (reminder.category === "due_today") {
+      return {
+        badgeClass: "badge-due-today",
+        badgeText: "Due Today",
+        accentClass: "accent-due-today"
+      };
+    }
+    const days = reminder.days_diff;
+    return {
+      badgeClass: "badge-upcoming",
+      badgeText: days === 1 ? "Upcoming · Due tomorrow" : `Upcoming · Due in ${days} days`,
+      accentClass: "accent-upcoming"
+    };
+  };
+
+  return (
+    <div
+      className={`notification-center-wrapper ${isMobileHeader ? "mobile-variant" : ""}`}
+      ref={wrapperRef}
+    >
+      <button
+        type="button"
+        className={`notification-bell-btn ${isOpen ? "active" : ""} ${unreadCount > 0 ? "has-unread" : ""}`}
+        onClick={() => setIsOpen(prev => !prev)}
+        aria-label={`Smart payment reminders, ${unreadCount} unread`}
+        title={unreadCount > 0 ? `${unreadCount} unread payment reminder${unreadCount === 1 ? "" : "s"}` : "Payment Reminders"}
+      >
+        <IconBell width={18} height={18} />
+        {unreadCount > 0 && (
+          <span className="notification-unread-badge" aria-hidden="true">
+            {unreadCount > 99 ? "99+" : unreadCount}
+          </span>
+        )}
+      </button>
+
+      {isOpen && (
+        <div className="notification-flyout" role="dialog" aria-label="Payment Reminders">
+          <div className="notification-flyout-header">
+            <div className="notification-header-title">
+              <IconBell width={16} height={16} className="notification-header-icon" />
+              <strong>Payment Reminders</strong>
+              {unreadCount > 0 ? (
+                <span className="notification-unread-pill">{unreadCount} new</span>
+              ) : (
+                <span className="notification-read-pill">All caught up</span>
+              )}
+            </div>
+            {unreadCount > 0 && (
+              <button
+                type="button"
+                className="notification-mark-all-btn"
+                onClick={() => onMarkAllAsRead && onMarkAllAsRead()}
+                title="Mark all reminders as read"
+              >
+                <IconCheck width={13} height={13} />
+                <span>Mark all read</span>
+              </button>
+            )}
+          </div>
+
+          <div className="notification-flyout-tabs">
+            <button
+              type="button"
+              className={`notification-tab-btn ${categoryFilter === "all" ? "active" : ""}`}
+              onClick={() => setCategoryFilter("all")}
+            >
+              All <span className="tab-count">{reminders.length}</span>
+            </button>
+            <button
+              type="button"
+              className={`notification-tab-btn tab-overdue ${categoryFilter === "overdue" ? "active" : ""}`}
+              onClick={() => setCategoryFilter("overdue")}
+            >
+              Overdue <span className="tab-count count-overdue">{overdueCount}</span>
+            </button>
+            <button
+              type="button"
+              className={`notification-tab-btn tab-due-today ${categoryFilter === "due_today" ? "active" : ""}`}
+              onClick={() => setCategoryFilter("due_today")}
+            >
+              Due Today <span className="tab-count count-due-today">{dueTodayCount}</span>
+            </button>
+            <button
+              type="button"
+              className={`notification-tab-btn tab-upcoming ${categoryFilter === "upcoming" ? "active" : ""}`}
+              onClick={() => setCategoryFilter("upcoming")}
+            >
+              Upcoming <span className="tab-count count-upcoming">{upcomingCount}</span>
+            </button>
+          </div>
+
+          <div className="notification-flyout-body">
+            {displayedReminders.length === 0 ? (
+              <div className="notification-empty-state">
+                <div className="notification-empty-icon">
+                  <IconCheckCircle width={32} height={32} />
+                </div>
+                <h4>{categoryFilter === "all" ? "No payment reminders" : `No ${categoryFilter.replace("_", " ")} reminders`}</h4>
+                <p>
+                  {categoryFilter === "all"
+                    ? "All customer invoices are up to date. You will be notified when payments become due or overdue."
+                    : `There are currently no active invoices in the ${categoryFilter.replace("_", " ")} category.`}
+                </p>
+              </div>
+            ) : (
+              displayedReminders.map(reminder => {
+                const isRead = readReminderIds.includes(reminder.id);
+                const { badgeClass, badgeText, accentClass } = getCategoryDetails(reminder);
+
+                return (
+                  <div
+                    key={reminder.id}
+                    className={`reminder-card ${accentClass} ${isRead ? "read" : "unread"}`}
+                    onClick={() => {
+                      if (onOpenInvoice) onOpenInvoice(reminder);
+                      setIsOpen(false);
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        if (onOpenInvoice) onOpenInvoice(reminder);
+                        setIsOpen(false);
+                      }
+                    }}
+                  >
+                    <div className="reminder-card-header">
+                      <div className="reminder-card-tags">
+                        <span className={`reminder-category-badge ${badgeClass}`}>
+                          {badgeText}
+                        </span>
+                        {!isRead && <span className="reminder-unread-dot" title="Unread notification" />}
+                      </div>
+                      <span className="reminder-amount">
+                        {formatCurrency(reminder.amount, reminder.currency)}
+                      </span>
+                    </div>
+
+                    <div className="reminder-card-body">
+                      <div className="reminder-customer-info">
+                        <strong className="reminder-customer-name">{reminder.customer}</strong>
+                        <span className="reminder-invoice-id">{reminder.invoice_id}</span>
+                      </div>
+                      <div className="reminder-meta-row">
+                        <span className="reminder-due-date">
+                          <IconCalendar width={12} height={12} />
+                          Due: {reminder.due_date}
+                        </span>
+                        <span className="reminder-currency-tag">
+                          {reminder.currency}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="reminder-card-footer" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        className="reminder-action-btn primary"
+                        onClick={() => {
+                          if (onOpenInvoice) onOpenInvoice(reminder);
+                          setIsOpen(false);
+                        }}
+                      >
+                        Open Invoice &rarr;
+                      </button>
+                      <button
+                        type="button"
+                        className="reminder-action-btn secondary"
+                        onClick={() => {
+                          if (onViewInList) onViewInList(reminder);
+                          setIsOpen(false);
+                        }}
+                      >
+                        Find in List
+                      </button>
+                      <button
+                        type="button"
+                        className="reminder-toggle-read-btn"
+                        onClick={() => onMarkAsRead && onMarkAsRead(reminder.id)}
+                        title={isRead ? "Keep as read" : "Mark as read"}
+                      >
+                        {isRead ? "Read" : "Mark read"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="notification-flyout-footer">
+            <span className="notification-flyout-footer-note">
+              PayPilot AI Smart Reminders · Real-time ledger sync
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function App() {
@@ -164,6 +519,78 @@ function App() {
     { description: "", quantity: 1, price: 0 }
   ]);
   const [savedInvoices, setSavedInvoices] = useState([]);
+
+  // Smart Payment Reminders State
+  const [readReminderIds, setReadReminderIds] = useState(() => {
+    try {
+      const stored = localStorage.getItem("paypilot_read_reminders");
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const reminders = useMemo(() => {
+    return getPaymentReminders(savedInvoices);
+  }, [savedInvoices]);
+
+  const markReminderAsRead = (id) => {
+    setReadReminderIds(prev => {
+      const updated = prev.includes(id) ? prev : [...prev, id];
+      try {
+        localStorage.setItem("paypilot_read_reminders", JSON.stringify(updated));
+      } catch (e) {
+        console.error("Failed to save read reminders", e);
+      }
+      return updated;
+    });
+  };
+
+  const markAllRemindersAsRead = () => {
+    const allIds = reminders.map(r => r.id);
+    setReadReminderIds(prev => {
+      const combined = Array.from(new Set([...prev, ...allIds]));
+      try {
+        localStorage.setItem("paypilot_read_reminders", JSON.stringify(combined));
+      } catch (e) {
+        console.error("Failed to save read reminders", e);
+      }
+      return combined;
+    });
+  };
+
+  const handleOpenReminderInvoice = (reminder) => {
+    markReminderAsRead(reminder.id);
+    const inv = savedInvoices.find(i => i.id === reminder.invoice_id);
+    if (inv) {
+      editInvoice(inv);
+    } else {
+      setPage("Invoices");
+      setSearchTerm(reminder.invoice_id);
+      setStatusFilter("All");
+      setOverdueOnly(false);
+    }
+  };
+
+  const handleViewReminderInList = (reminder) => {
+    markReminderAsRead(reminder.id);
+    setPage("Invoices");
+    setSearchTerm(reminder.invoice_id);
+    setStatusFilter("All");
+    setOverdueOnly(false);
+  };
+
+  const renderNotificationCenter = (isMobile = false) => (
+    <NotificationCenter
+      reminders={reminders}
+      readReminderIds={readReminderIds}
+      onMarkAsRead={markReminderAsRead}
+      onMarkAllAsRead={markAllRemindersAsRead}
+      onOpenInvoice={handleOpenReminderInvoice}
+      onViewInList={handleViewReminderInList}
+      isMobileHeader={isMobile}
+    />
+  );
   const [invoicesLoading, setInvoicesLoading] = useState(true);
   const [invoicesError, setInvoicesError] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
@@ -1942,14 +2369,17 @@ async function loadInvoices() {
           <div className="brand-icon">P</div>
           <h2>PayPilot<span> AI</span></h2>
         </div>
-        <button
-          type="button"
-          className="mobile-menu-btn"
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          {renderNotificationCenter(true)}
+          <button
+            type="button"
+            className="mobile-menu-btn"
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
           aria-label="Toggle navigation menu"
-        >
-          {mobileMenuOpen ? <IconClose width={22} height={22} /> : <IconMenu width={22} height={22} />}
-        </button>
+          >
+            {mobileMenuOpen ? <IconClose width={22} height={22} /> : <IconMenu width={22} height={22} />}
+          </button>
+        </div>
       </div>
 
       {mobileMenuOpen && (
@@ -2049,6 +2479,7 @@ async function loadInvoices() {
                   <p className="page-subtitle">Real-time multi-currency receivables, liquidity exposure & billing operations.</p>
                 </div>
                 <div className="top-actions">
+                  {renderNotificationCenter()}
                   <button type="button" className="period-btn" onClick={loadInvoices} title="Reload financial ledger">
                     <IconRefresh width={14} height={14} /> Refresh
                   </button>
@@ -2361,7 +2792,10 @@ async function loadInvoices() {
                 <h1>Invoices</h1>
                 <p className="page-subtitle">Create and manage your customer invoices.</p>
               </div>
-              <button className="create-btn" onClick={openCreateInvoice}><IconPlus width={15} height={15} /> New Invoice</button>
+              <div className="top-actions">
+                {renderNotificationCenter()}
+                <button className="create-btn" onClick={openCreateInvoice}><IconPlus width={15} height={15} /> New Invoice</button>
+              </div>
             </header>
 
             <div className="stats invoices-stats-grid">
@@ -2617,7 +3051,10 @@ async function loadInvoices() {
                 <h1>Create new invoice</h1>
                 <p className="page-subtitle">Add customer and service details.</p>
               </div>
-              <button className="period-btn" onClick={handleBack}>← Back to {previousPage === "Customers" ? "Customer" : (previousPage || "Invoices")}</button>
+              <div className="top-actions">
+                {renderNotificationCenter()}
+                <button className="period-btn" onClick={handleBack}>← Back to {previousPage === "Customers" ? "Customer" : (previousPage || "Invoices")}</button>
+              </div>
             </header>
 
 {renderAIGenerator()}
@@ -2862,6 +3299,7 @@ async function loadInvoices() {
                 <p className="page-subtitle">Track, audit, and inspect all PayPal Sandbox transactions and settlements.</p>
               </div>
               <div className="top-actions">
+                {renderNotificationCenter()}
                 <button type="button" className="period-btn" onClick={loadPayments} title="Refresh payments ledger">
                   <IconRefresh width={14} height={14} /> Refresh
                 </button>
@@ -3089,7 +3527,10 @@ async function loadInvoices() {
                 <h1>AI Invoice Copilot</h1>
                 <p className="page-subtitle">Ask questions about the ledger, then draft invoices from plain English.</p>
               </div>
-              <button className="create-btn" onClick={() => setPage("Invoices")}>Back to Invoices</button>
+              <div className="top-actions">
+                {renderNotificationCenter()}
+                <button className="create-btn" onClick={() => setPage("Invoices")}>Back to Invoices</button>
+              </div>
             </header>
 
             <section className="panel copilot-ask-panel">
@@ -3237,6 +3678,7 @@ async function loadInvoices() {
                     <p className="page-subtitle">Manage client profiles, inspect invoice histories, and track multi-currency balances.</p>
                   </div>
                   <div className="top-actions">
+                    {renderNotificationCenter()}
                     <button type="button" className="period-btn" onClick={loadCustomers} title="Refresh customers list">
                       <IconRefresh width={14} height={14} /> Refresh
                     </button>
@@ -3456,6 +3898,7 @@ async function loadInvoices() {
                     <p className="page-subtitle">{activeCustomer.company ? `${activeCustomer.company} · ` : ""}Client ID: {activeCustomer.id}</p>
                   </div>
                   <div className="top-actions">
+                    {renderNotificationCenter()}
                     <button type="button" className="period-btn" onClick={() => setViewingCustomerId(null)}>
                       Back to Directory
                     </button>
@@ -3723,6 +4166,7 @@ async function loadInvoices() {
                 <p className="page-subtitle">Real-time revenue metrics, multi-currency accounting breakdown, and payment audit logs.</p>
               </div>
               <div className="top-actions">
+                {renderNotificationCenter()}
                 <button
                   type="button"
                   className="period-btn"
@@ -4030,6 +4474,9 @@ async function loadInvoices() {
                 <p className="breadcrumb">Workspace / Settings</p>
                 <h1>Application & Business Settings</h1>
                 <p className="page-subtitle">Configure your merchant profile, default invoice currency, payment terms, and gateway preferences.</p>
+              </div>
+              <div className="top-actions">
+                {renderNotificationCenter()}
               </div>
             </header>
 
