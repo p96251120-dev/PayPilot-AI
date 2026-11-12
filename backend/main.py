@@ -26,6 +26,13 @@ def _clean_secret(val: str | None) -> str | None:
     if not val:
         return None
     s = val.strip()
+    # Strip wrapping quotes if user pasted them
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1].strip()
+    # Strip accidental variable assignment prefixes if pasted as KEY=value or export KEY=value
+    for prefix in ["export CHANNEL3_API_KEY=", "CHANNEL3_API_KEY=", "CHANNEL3_API_KEY:", "Bearer ", "bearer "]:
+        if s.startswith(prefix):
+            s = s[len(prefix):].strip()
     if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
         s = s[1:-1].strip()
     return s or None
@@ -857,6 +864,13 @@ def search_products(data: ProductSearchRequest):
             detail="Channel3 API key is not configured. Please add CHANNEL3_API_KEY in backend environment settings."
         )
 
+    if "your_optional" in c3_key.lower() or c3_key.lower().startswith("your_"):
+        print("[Channel3] Search request rejected: CHANNEL3_API_KEY is set to documentation placeholder", flush=True)
+        raise HTTPException(
+            status_code=500,
+            detail="CHANNEL3_API_KEY is set to a placeholder ('your_optional_channel3_api_key'). Please replace it in Render with your actual Channel3 API key from backend/.env."
+        )
+
     if not data.query or not data.query.strip():
         raise HTTPException(
             status_code=400,
@@ -871,7 +885,9 @@ def search_products(data: ProductSearchRequest):
             "https://api.trychannel3.com/v1/search",
             headers={
                 "x-api-key": c3_key,
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "PayPilot-AI/1.0"
             },
             json={
                 "query": clean_query,
@@ -891,7 +907,11 @@ def search_products(data: ProductSearchRequest):
         print(f"[Channel3] Upstream returned HTTP {status_code}: {safe_detail}", flush=True)
 
         if status_code in (401, 403):
-            detail_msg = f"Channel3 authentication failed (HTTP {status_code}): {safe_detail}. Check that CHANNEL3_API_KEY is valid and unquoted in Render environment."
+            detail_msg = (
+                f"Channel3 authentication failed (HTTP {status_code}): {safe_detail}. "
+                f"The key configured in Render (length {len(c3_key)}) was rejected by api.trychannel3.com. "
+                f"Ensure the active 40-character key from local backend/.env is set in Render environment."
+            )
             raise HTTPException(status_code=502, detail=detail_msg)
         elif status_code == 429:
             detail_msg = "Channel3 rate limit exceeded (HTTP 429). Please wait a moment before trying again."
