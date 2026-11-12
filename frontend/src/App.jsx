@@ -616,6 +616,8 @@ const [similarProducts, setSimilarProducts] = useState([]);
 const [relatedProducts, setRelatedProducts] = useState([]);
 const [paymentLoading, setPaymentLoading] = useState(false);
 const [paymentNotification, setPaymentNotification] = useState(null);
+const captureInFlightRef = useRef(new Set());
+const cancelInFlightRef = useRef(new Set());
   const [invoiceCurrency, setInvoiceCurrency] = useState("USD");
   const [dueDate, setDueDate] = useState(getDefaultDueDate(30));
   const [payments, setPayments] = useState([]);
@@ -963,6 +965,73 @@ useEffect(() => {
     }
   }
 
+  function clearPaymentQueryParams() {
+    const params = new URLSearchParams(window.location.search);
+    ["payment", "invoiceId", "token", "PayerID"].forEach(k => params.delete(k));
+    const qs = params.toString();
+    const cleanUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+    window.history.replaceState({}, document.title, cleanUrl);
+  }
+
+  async function executePayPalCapture(orderId, invoiceId) {
+    if (!orderId || !invoiceId) return;
+    const storageKey = `paypilot_captured_${orderId}`;
+    if (captureInFlightRef.current.has(orderId) || sessionStorage.getItem(storageKey)) {
+      return;
+    }
+
+    captureInFlightRef.current.add(orderId);
+    setPaymentLoading(true);
+    setPaymentNotification({
+      type: "info",
+      message: `Verifying and capturing PayPal payment for invoice ${invoiceId}...`
+    });
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/payments/capture-order`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          order_id: orderId,
+          invoice_id: invoiceId
+        })
+      });
+
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (_) {
+        data = {};
+      }
+      if (!response.ok) {
+        throw new Error(data.detail || `Payment capture failed (HTTP ${response.status}).`);
+      }
+
+      sessionStorage.setItem(storageKey, "1");
+      clearPaymentQueryParams();
+
+      await loadInvoices();
+      await loadPayments();
+      setPage("Invoices");
+      setPaymentNotification({
+        type: "success",
+        message: `Payment successful! Invoice ${invoiceId} has been marked as Paid. (Transaction Ref: ${data.capture_id || orderId})`
+      });
+    } catch (err) {
+      await loadPayments();
+      setPaymentNotification({
+        type: "error",
+        message: `Payment capture error: ${err.message}`,
+        onRetry: () => executePayPalCapture(orderId, invoiceId)
+      });
+    } finally {
+      captureInFlightRef.current.delete(orderId);
+      setPaymentLoading(false);
+    }
+  }
+
   async function handlePaymentReturn() {
     const urlParams = new URLSearchParams(window.location.search);
     const paymentStatus = urlParams.get("payment");
@@ -971,63 +1040,40 @@ useEffect(() => {
 
     if (!paymentStatus) return;
 
-    window.history.replaceState({}, document.title, window.location.pathname);
-
     if (paymentStatus === "success" && orderId && invoiceId) {
-      setPaymentLoading(true);
-      setPaymentNotification({
-        type: "info",
-        message: `Verifying and capturing PayPal payment for invoice ${invoiceId}...`
-      });
-
+      await executePayPalCapture(orderId, invoiceId);
+    } else if (paymentStatus === "cancel") {
+      const cancelKey = `${invoiceId || ""}:${orderId || ""}`;
+      if (cancelInFlightRef.current.has(cancelKey)) return;
+      cancelInFlightRef.current.add(cancelKey);
       try {
-        const response = await fetch(`${API_BASE_URL}/api/payments/capture-order`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            order_id: orderId,
-            invoice_id: invoiceId
-          })
-        });
-
-        const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data.detail || "Payment capture failed.");
+        if (invoiceId) {
+          const resp = await fetch(`${API_BASE_URL}/api/payments/record-cancel`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ invoice_id: invoiceId, order_id: orderId || null })
+          });
+          if (resp.ok) {
+            clearPaymentQueryParams();
+            await loadInvoices();
+            await loadPayments();
+          }
+        } else {
+          clearPaymentQueryParams();
         }
-
-        await loadInvoices();
-        await loadPayments();
-        setPage("Invoices");
         setPaymentNotification({
-          type: "success",
-          message: `Payment successful! Invoice ${invoiceId} has been marked as Paid. (Transaction Ref: ${data.capture_id || orderId})`
+          type: "warning",
+          message: `PayPal payment was cancelled. Invoice ${invoiceId || ""} was not charged.`
         });
       } catch (err) {
-        await loadPayments();
+        console.error("Error recording cancel:", err);
         setPaymentNotification({
-          type: "error",
-          message: `Payment capture error: ${err.message}`
+          type: "warning",
+          message: `PayPal payment was cancelled. Invoice ${invoiceId || ""} was not charged.`
         });
       } finally {
-        setPaymentLoading(false);
+        cancelInFlightRef.current.delete(cancelKey);
       }
-    } else if (paymentStatus === "cancel") {
-      if (invoiceId) {
-        fetch(`${API_BASE_URL}/api/payments/record-cancel`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ invoice_id: invoiceId, order_id: orderId || null })
-        }).then(() => {
-          loadInvoices();
-          loadPayments();
-        }).catch(err => console.error("Error recording cancel:", err));
-      }
-      setPaymentNotification({
-        type: "warning",
-        message: `PayPal payment was cancelled. Invoice ${invoiceId || ""} was not charged.`
-      });
     }
   }
 
@@ -2450,7 +2496,19 @@ async function loadInvoices() {
       <main className="main">
         {paymentNotification && (
           <div className={`payment-notification-banner ${paymentNotification.type}`}>
-            <span>{paymentNotification.message}</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+              <span>{paymentNotification.message}</span>
+              {paymentNotification.onRetry && (
+                <button
+                  type="button"
+                  className="retry-btn"
+                  disabled={paymentLoading}
+                  onClick={paymentNotification.onRetry}
+                >
+                  {paymentLoading ? "Retrying..." : "Retry Capture"}
+                </button>
+              )}
+            </span>
             <button onClick={() => setPaymentNotification(null)} aria-label="Dismiss"><IconClose width={14} height={14} /></button>
           </div>
         )}

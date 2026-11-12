@@ -802,13 +802,25 @@ a {
   justify-content: space-between;
   padding: 6px 10px;
   background: #f8fafc;
-  border: 1px solid var(--border-subtle);
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
   border-radius: var(--radius-sm);
 }
 
 .currency-subcard .currency-amt {
   font-size: 15px;
   font-weight: 600;
+  color: #0f172a;
+}
+
+.currency-metric-display.alert .currency-subcard .currency-amt {
+  color: #dc2626;
+}
+
+.currency-subcard .currency-badge {
+  color: #1e293b;
+  background: #e2e8f0;
+  border-color: #cbd5e1;
 }
 
 /* ==========================================================================
@@ -893,6 +905,31 @@ a {
   background: rgba(255, 255, 255, 0.1) !important;
   color: #93c5fd !important;
   border-color: rgba(255, 255, 255, 0.18) !important;
+}
+
+/* Multi-currency subcard contrast fix inside Settled Revenue & Net Liquidity hero */
+.hero-main-amount .currency-subcard {
+  background: #f8fafc;
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
+  padding: 8px 14px;
+}
+
+.hero-main-amount .currency-subcard .currency-amt {
+  color: #0f172a !important;
+  font-size: 22px !important;
+  font-weight: 800 !important;
+}
+
+.hero-main-amount .currency-metric-display.alert .currency-subcard .currency-amt {
+  color: #dc2626 !important;
+}
+
+.hero-main-amount .currency-subcard .currency-badge {
+  color: #1e293b !important;
+  background: #e2e8f0 !important;
+  border-color: #cbd5e1 !important;
+  font-weight: 700 !important;
 }
 
 .hero-efficiency-meter {
@@ -1011,8 +1048,16 @@ a {
 }
 
 /* Multi-currency subcard visibility override inside hero ledger cards */
+.card-figure .currency-subcard,
+.hero-ledger-card .currency-subcard {
+  background: #f8fafc;
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
+}
+
 .card-figure .currency-subcard .currency-amt,
-.hero-ledger-card .currency-subcard .currency-amt {
+.hero-ledger-card .currency-subcard .currency-amt,
+.hero-ledger-card.settled .currency-subcard .currency-amt {
   color: #0f172a !important;
   font-size: 16px !important;
   font-weight: 700 !important;
@@ -4745,6 +4790,10 @@ a {
 
   .hero-main-amount .currency-amt {
     font-size: 20px !important;
+  }
+
+  .hero-main-amount .currency-subcard .currency-amt {
+    font-size: 17px !important;
   }
 }
 

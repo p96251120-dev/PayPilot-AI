@@ -22,9 +22,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-CHANNEL3_API_KEY = os.getenv("CHANNEL3_API_KEY")
-PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID")
-PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET")
+CHANNEL3_API_KEY = (os.getenv("CHANNEL3_API_KEY") or "").strip() or None
+PAYPAL_CLIENT_ID = (os.getenv("PAYPAL_CLIENT_ID") or "").strip() or None
+PAYPAL_CLIENT_SECRET = (os.getenv("PAYPAL_CLIENT_SECRET") or "").strip() or None
 PAYPAL_SANDBOX_BASE = "https://api-m.sandbox.paypal.com"
 
 
@@ -1193,8 +1193,110 @@ def delete_invoice(invoice_id: str):
 
 # ---------------- PAYPAL SANDBOX INTEGRATION ----------------
 
+def extract_paypal_error_detail(response: requests.Response | None, default_msg: str) -> str:
+    """
+    Extracts safe diagnostic fields from PayPal REST API error responses
+    (name, message, error_description, details[].issue, debug_id).
+    Never exposes credentials, Authorization headers, or access tokens.
+    """
+    if response is None:
+        return default_msg
+
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            parts: list[str] = []
+            error_desc = data.get("error_description") or data.get("error")
+            if error_desc and isinstance(error_desc, str) and error_desc.strip():
+                parts.append(error_desc.strip())
+
+            name = data.get("name")
+            if name and isinstance(name, str) and name.strip() and name.strip() not in parts:
+                parts.append(name.strip())
+
+            msg = data.get("message")
+            if msg and isinstance(msg, str) and msg.strip() and msg.strip() not in parts:
+                parts.append(msg.strip())
+
+            details = data.get("details")
+            if isinstance(details, list):
+                for d in details[:3]:
+                    if isinstance(d, dict):
+                        issue = d.get("issue")
+                        desc = d.get("description")
+                        if issue:
+                            detail_str = f"{issue}: {desc}" if desc else str(issue)
+                            if detail_str not in parts:
+                                parts.append(detail_str)
+
+            debug_id = data.get("debug_id")
+            if debug_id:
+                parts.append(f"debug_id={debug_id}")
+
+            if parts:
+                status_code = getattr(response, "status_code", None)
+                prefix = f"{default_msg} (HTTP {status_code})" if isinstance(status_code, int) else default_msg
+                return f"{prefix}: {' | '.join(parts)}"
+    except Exception:
+        pass
+
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return f"{default_msg} (HTTP {status_code})"
+    return default_msg
+
+
+def _record_failed_capture_attempt(connection, row, order_id: str, failure_reason: str):
+    """
+    Records or updates a Failed payment entry safely associated with the existing invoice/order.
+    Updates any existing non-Completed entry for the same (paypal_order_id, invoice_id) in place
+    so retries never create duplicate Failed rows or mark the invoice Paid.
+    """
+    invoice_id = row["id"]
+    row_keys = row.keys()
+    existing_pay = connection.execute(
+        "SELECT id, status FROM payments WHERE paypal_order_id = ? AND invoice_id = ? ORDER BY rowid DESC LIMIT 1",
+        (order_id, invoice_id),
+    ).fetchone()
+
+    if existing_pay:
+        if (existing_pay["status"] or "").lower() != "completed":
+            connection.execute(
+                "UPDATE payments SET status = 'Failed', failure_reason = ? WHERE id = ?",
+                (failure_reason, existing_pay["id"]),
+            )
+    else:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        pay_id = f"PAY-{secrets.token_hex(4).upper()}"
+        expected_currency = row["currency"] if "currency" in row_keys and row["currency"] else "USD"
+        connection.execute(
+            """
+            INSERT INTO payments (
+                id, invoice_id, customer, email, amount, currency,
+                status, provider, paypal_order_id, paypal_capture_id,
+                failure_reason, created_at, paid_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'Failed', 'PayPal Sandbox', ?, NULL, ?, ?, NULL)
+            """,
+            (
+                pay_id,
+                invoice_id,
+                row["customer"],
+                row["email"],
+                row["total"],
+                expected_currency,
+                order_id,
+                failure_reason,
+                now_iso,
+            ),
+        )
+    connection.commit()
+
+
 def get_paypal_access_token():
-    if not PAYPAL_CLIENT_ID or not PAYPAL_CLIENT_SECRET:
+    client_id = (PAYPAL_CLIENT_ID or "").strip()
+    client_secret = (PAYPAL_CLIENT_SECRET or "").strip()
+    if not client_id or not client_secret:
         raise HTTPException(
             status_code=500,
             detail="PayPal credentials (PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET) are not configured in environment"
@@ -1205,19 +1307,35 @@ def get_paypal_access_token():
     try:
         response = requests.post(
             f"{api_base}/v1/oauth2/token",
-            auth=(PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET),
+            auth=(client_id, client_secret),
             data={"grant_type": "client_credentials"},
             headers={"Accept": "application/json", "Accept-Language": "en_US"},
             timeout=20
         )
+        if isinstance(getattr(response, "status_code", None), int) and response.status_code >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail=extract_paypal_error_detail(response, "Failed to authenticate with PayPal"),
+            )
         response.raise_for_status()
         token_data = response.json()
-        return token_data.get("access_token")
+        token = token_data.get("access_token") if isinstance(token_data, dict) else None
+        if not token:
+            raise HTTPException(
+                status_code=502,
+                detail="Failed to authenticate with PayPal: access token missing in OAuth response",
+            )
+        return token
+    except HTTPException:
+        raise
     except requests.RequestException as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to authenticate with PayPal: {str(e)}"
+        resp = getattr(e, "response", None)
+        detail = (
+            extract_paypal_error_detail(resp, "Failed to authenticate with PayPal")
+            if resp is not None
+            else f"Failed to authenticate with PayPal ({type(e).__name__})"
         )
+        raise HTTPException(status_code=502, detail=detail)
 
 
 @app.post("/api/payments/create-order/{invoice_id}")
@@ -1301,6 +1419,10 @@ def create_paypal_order(
             json=order_payload,
             timeout=20
         )
+        if isinstance(getattr(res, "status_code", None), int) and res.status_code >= 400:
+            detail = extract_paypal_error_detail(res, "Failed to create PayPal order")
+            connection.close()
+            raise HTTPException(status_code=502, detail=detail)
         res.raise_for_status()
         order_data = res.json()
         order_id = order_data.get("id")
@@ -1350,9 +1472,17 @@ def create_paypal_order(
             "message": "PayPal order created successfully"
         }
 
+    except HTTPException:
+        raise
     except requests.RequestException as e:
+        resp = getattr(e, "response", None)
+        detail = (
+            extract_paypal_error_detail(resp, "Failed to create PayPal order")
+            if resp is not None
+            else f"Failed to create PayPal order: {str(e)}"
+        )
         connection.close()
-        raise HTTPException(status_code=502, detail=f"Failed to create PayPal order: {str(e)}")
+        raise HTTPException(status_code=502, detail=detail)
 
 
 @app.post("/api/payments/capture-order")
@@ -1411,6 +1541,11 @@ def capture_paypal_order(data: CapturePaymentRequest):
             json={},
             timeout=20
         )
+        if isinstance(getattr(res, "status_code", None), int) and res.status_code >= 400:
+            fail_reason = extract_paypal_error_detail(res, "Failed to capture PayPal payment")
+            _record_failed_capture_attempt(connection, row, data.order_id, fail_reason)
+            connection.close()
+            raise HTTPException(status_code=502, detail=fail_reason)
         res.raise_for_status()
         capture_data = res.json()
 
@@ -1570,12 +1705,19 @@ def capture_paypal_order(data: CapturePaymentRequest):
             "message": "Payment captured successfully and invoice marked as Paid."
         }
 
+    except HTTPException:
+        raise
     except requests.RequestException as e:
-        connection.close()
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to capture PayPal payment: {str(e)}"
+        resp = getattr(e, "response", None)
+        fail_reason = (
+            extract_paypal_error_detail(resp, "Failed to capture PayPal payment")
+            if resp is not None
+            else f"Failed to capture PayPal payment: {str(e)}"
         )
+        if resp is not None:
+            _record_failed_capture_attempt(connection, row, data.order_id, fail_reason)
+        connection.close()
+        raise HTTPException(status_code=502, detail=fail_reason)
 
 
 # ---------------- PAYMENTS HISTORY & MANAGEMENT ----------------
