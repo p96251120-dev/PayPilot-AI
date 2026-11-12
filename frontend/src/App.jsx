@@ -2516,7 +2516,7 @@ async function loadInvoices() {
                           const verifiedPayPalCount = paidInvoices.filter(inv => Boolean(inv.paypal_capture_id)).length;
                           const demoPaidCount = paidInvoices.filter(inv =>
                             !inv.paypal_capture_id &&
-                            savedPayments.some(p => p.invoice_id === inv.id && (p.provider || "").toLowerCase() === "demo data (simulated)")
+                            (Array.isArray(payments) ? payments : []).some(p => p.invoice_id === inv.id && (p.provider || "").toLowerCase() === "demo data (simulated)")
                           ).length;
                           if (verifiedPayPalCount > 0 && demoPaidCount > 0) {
                             return `${paidInvoices.length} of ${totalCount} invoices settled · ${verifiedPayPalCount} PayPal Sandbox, ${demoPaidCount} demo simulated`;
