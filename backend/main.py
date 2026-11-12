@@ -75,12 +75,81 @@ except ValueError:
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5174")
 
+DEFAULT_LOCAL_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:5175",
+    "http://127.0.0.1:5175",
+    "http://localhost:5176",
+    "http://127.0.0.1:5176",
+    "http://10.118.29.99:5173",
+    "http://10.118.29.99:5174",
+    "http://10.118.29.99:5175",
+    "http://10.118.29.99:5176",
+]
 
-def is_safe_frontend_host(hostname: str | None) -> bool:
+
+def _normalize_origin(raw: str | None) -> str | None:
     """
-    Checks if a hostname is a safe local development or private LAN host.
-    Blocks all external/public internet domains and malicious origins.
+    Normalizes an HTTP/HTTPS origin to 'scheme://hostname[:port]' without path or wildcard.
+    Returns None for invalid, non-HTTP(S), or wildcard origins.
     """
+    if not raw or not isinstance(raw, str):
+        return None
+    cleaned = raw.strip().rstrip("/")
+    if not cleaned or "*" in cleaned:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(cleaned)
+        scheme = (parsed.scheme or "").lower()
+        hostname = (parsed.hostname or "").lower()
+        if scheme not in ("http", "https") or not hostname:
+            return None
+        port = parsed.port
+        if (scheme == "https" and port == 443) or (scheme == "http" and port == 80):
+            port = None
+        port_part = f":{port}" if port else ""
+        return f"{scheme}://{hostname}{port_part}"
+    except Exception:
+        return None
+
+
+def get_configured_frontend_origins() -> list[str]:
+    """
+    Reads FRONTEND_URL and comma-separated ALLOWED_ORIGINS from the environment,
+    returning normalized, deduplicated HTTP/HTTPS origins (never wildcards).
+    """
+    raw_candidates = []
+    env_frontend = os.getenv("FRONTEND_URL")
+    if env_frontend:
+        raw_candidates.append(env_frontend)
+    env_allowed = os.getenv("ALLOWED_ORIGINS", "")
+    if env_allowed:
+        raw_candidates.extend(env_allowed.split(","))
+
+    origins: list[str] = []
+    for item in raw_candidates:
+        norm = _normalize_origin(item)
+        if norm and norm not in origins:
+            origins.append(norm)
+    return origins
+
+
+def get_cors_origins() -> list[str]:
+    """
+    Combines default local/LAN development origins with configured production
+    frontend origins from FRONTEND_URL and ALLOWED_ORIGINS (no wildcards).
+    """
+    origins = list(DEFAULT_LOCAL_ORIGINS)
+    for origin in get_configured_frontend_origins():
+        if origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+def _is_local_or_private_host(hostname: str | None) -> bool:
     if not hostname or not isinstance(hostname, str):
         return False
     h = hostname.strip().lower()
@@ -93,29 +162,56 @@ def is_safe_frontend_host(hostname: str | None) -> bool:
         return False
 
 
+def is_safe_frontend_host(hostname: str | None) -> bool:
+    """
+    Checks if a hostname is a safe local development/private LAN host
+    or explicitly matches a configured FRONTEND_URL / ALLOWED_ORIGINS host.
+    Blocks all unapproved external/public internet domains and malicious origins.
+    """
+    if _is_local_or_private_host(hostname):
+        return True
+    if not hostname or not isinstance(hostname, str):
+        return False
+    h = hostname.strip().lower()
+    for origin in get_configured_frontend_origins():
+        parsed = urllib.parse.urlsplit(origin)
+        if parsed.hostname and parsed.hostname.lower() == h:
+            return True
+    return False
+
+
 def validate_frontend_origin(candidate: str | None) -> str:
     """
     Validates and normalizes candidate frontend origin.
     Prevents open redirect attacks by strictly allowing only localhost, 127.0.0.1,
-    or private local LAN IP origins (e.g. 10.118.29.99, 192.168.x.x, 172.16-31.x.x)
-    on valid ports. Falls back safely to FRONTEND_URL or http://localhost:5174.
+    private local LAN IP origins, or explicitly configured FRONTEND_URL / ALLOWED_ORIGINS
+    origins. Falls back safely to FRONTEND_URL or http://localhost:5174.
     """
     fallback = os.getenv("FRONTEND_URL", "http://localhost:5174").rstrip("/")
+    norm_fallback = _normalize_origin(fallback) or fallback
     if not candidate or not isinstance(candidate, str):
-        return fallback
+        return norm_fallback
+
+    norm_candidate = _normalize_origin(candidate)
+    if not norm_candidate:
+        return norm_fallback
 
     try:
-        parsed = urllib.parse.urlsplit(candidate.strip())
-        if parsed.scheme in ("http", "https") and is_safe_frontend_host(parsed.hostname):
-            port_part = f":{parsed.port}" if parsed.port else ""
-            return f"{parsed.scheme}://{parsed.hostname}{port_part}"
+        parsed = urllib.parse.urlsplit(norm_candidate)
+        if _is_local_or_private_host(parsed.hostname):
+            return norm_candidate
+        if norm_candidate in get_configured_frontend_origins():
+            return norm_candidate
     except Exception:
         pass
 
-    return fallback
+    return norm_fallback
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE = os.path.join(BASE_DIR, "paypilot.db")
+DEFAULT_DATABASE = os.path.join(BASE_DIR, "paypilot.db")
+_env_db_path = (os.getenv("DATABASE_PATH") or "").strip()
+DATABASE = os.path.abspath(_env_db_path) if _env_db_path else DEFAULT_DATABASE
 
 
 # ---------------- DATABASE SETUP ----------------
@@ -435,23 +531,8 @@ app = FastAPI(title="PayPilot AI API")
 
 app.add_middleware(
     CORSMiddleware,
-   
-allow_origins=[
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5174",
-    "http://localhost:5175",
-    "http://127.0.0.1:5175",
-    "http://localhost:5176",
-    "http://127.0.0.1:5176",
-    "http://10.118.29.99:5173",
-    "http://10.118.29.99:5174",
-    "http://10.118.29.99:5175",
-    "http://10.118.29.99:5176",
-],
+    allow_origins=get_cors_origins(),
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$",
-
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
