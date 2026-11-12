@@ -22,10 +22,28 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-CHANNEL3_API_KEY = (os.getenv("CHANNEL3_API_KEY") or "").strip() or None
-PAYPAL_CLIENT_ID = (os.getenv("PAYPAL_CLIENT_ID") or "").strip() or None
-PAYPAL_CLIENT_SECRET = (os.getenv("PAYPAL_CLIENT_SECRET") or "").strip() or None
+def _clean_secret(val: str | None) -> str | None:
+    if not val:
+        return None
+    s = val.strip()
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1].strip()
+    return s or None
+
+
+CHANNEL3_API_KEY = _clean_secret(os.getenv("CHANNEL3_API_KEY"))
+PAYPAL_CLIENT_ID = _clean_secret(os.getenv("PAYPAL_CLIENT_ID"))
+PAYPAL_CLIENT_SECRET = _clean_secret(os.getenv("PAYPAL_CLIENT_SECRET"))
 PAYPAL_SANDBOX_BASE = "https://api-m.sandbox.paypal.com"
+
+
+def get_channel3_api_key() -> str | None:
+    """
+    Returns the sanitized Channel3 API key from environment, falling back to module level.
+    Strips whitespace and surrounding quotes safely.
+    """
+    env_key = _clean_secret(os.getenv("CHANNEL3_API_KEY"))
+    return env_key or CHANNEL3_API_KEY
 
 
 def validate_paypal_api_base(url: str | None = None) -> str:
@@ -792,9 +810,11 @@ def health():
     except HTTPException:
         paypal_mode = "blocked_non_sandbox"
 
+    c3_key = get_channel3_api_key()
+
     return {
         "status": "healthy",
-        "channel3_configured": bool(CHANNEL3_API_KEY),
+        "channel3_configured": bool(c3_key),
         "paypal_configured": bool(PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET),
         "paypal_mode": paypal_mode
     }
@@ -802,42 +822,113 @@ def health():
 
 # ---------------- CHANNEL3 PRODUCT SEARCH ----------------
 
+def _sanitize_channel3_error_detail(response: requests.Response | None, default_msg: str) -> str:
+    """
+    Extracts safe diagnostic error details from Channel3 response.
+    Never exposes API keys, Authorization headers, or private credentials.
+    """
+    if response is None:
+        return default_msg
+
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            msg = data.get("message") or data.get("error") or data.get("detail")
+            if msg and isinstance(msg, str) and msg.strip():
+                return msg.strip()
+    except Exception:
+        pass
+
+    raw_text = (getattr(response, "text", "") or "").strip()
+    if raw_text and len(raw_text) <= 120 and not any(kw in raw_text.lower() for kw in ["secret", "password", "token", "key"]):
+        return raw_text
+
+    return default_msg
+
+
 @app.post("/api/products/search")
 def search_products(data: ProductSearchRequest):
+    c3_key = get_channel3_api_key()
 
-    if not CHANNEL3_API_KEY:
+    if not c3_key:
+        print("[Channel3] Search request rejected: CHANNEL3_API_KEY is not configured", flush=True)
         raise HTTPException(
             status_code=500,
-            detail="Channel3 API key is not configured"
+            detail="Channel3 API key is not configured. Please add CHANNEL3_API_KEY in backend environment settings."
         )
 
-    if not data.query.strip():
+    if not data.query or not data.query.strip():
         raise HTTPException(
             status_code=400,
             detail="Product search query cannot be empty"
         )
 
+    clean_query = data.query.strip()
+    print(f"[Channel3] Sending product search request to api.trychannel3.com (query='{clean_query}', limit=5)", flush=True)
+
     try:
         response = requests.post(
             "https://api.trychannel3.com/v1/search",
             headers={
-                "x-api-key": CHANNEL3_API_KEY,
+                "x-api-key": c3_key,
                 "Content-Type": "application/json"
             },
             json={
-                "query": data.query,
+                "query": clean_query,
                 "limit": 5
             },
             timeout=20
         )
 
-        response.raise_for_status()
-        return response.json()
+        status_code = response.status_code
+        if status_code == 200:
+            result = response.json()
+            num_products = len(result.get("products", [])) if isinstance(result, dict) else 0
+            print(f"[Channel3] Search successful (HTTP 200, {num_products} products found for '{clean_query}')", flush=True)
+            return result
 
-    except requests.RequestException:
+        safe_detail = _sanitize_channel3_error_detail(response, "Upstream service error")
+        print(f"[Channel3] Upstream returned HTTP {status_code}: {safe_detail}", flush=True)
+
+        if status_code in (401, 403):
+            detail_msg = f"Channel3 authentication failed (HTTP {status_code}): {safe_detail}. Check that CHANNEL3_API_KEY is valid and unquoted in Render environment."
+            raise HTTPException(status_code=502, detail=detail_msg)
+        elif status_code == 429:
+            detail_msg = "Channel3 rate limit exceeded (HTTP 429). Please wait a moment before trying again."
+            raise HTTPException(status_code=429, detail=detail_msg)
+        elif status_code == 422:
+            detail_msg = f"Channel3 rejected search query parameters (HTTP 422): {safe_detail}"
+            raise HTTPException(status_code=422, detail=detail_msg)
+        else:
+            detail_msg = f"Channel3 upstream service error (HTTP {status_code}): {safe_detail}"
+            raise HTTPException(status_code=502, detail=detail_msg)
+
+    except requests.exceptions.Timeout:
+        print(f"[Channel3] Request timed out after 20s for query='{clean_query}'", flush=True)
+        raise HTTPException(
+            status_code=504,
+            detail="Channel3 product search timed out after 20 seconds. Upstream API is unresponsive."
+        )
+    except requests.exceptions.InvalidHeader:
+        print("[Channel3] Invalid header error: API key contains reserved or invalid characters", flush=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Channel3 API key format invalid. Ensure CHANNEL3_API_KEY contains no quotes, whitespace, or newlines."
+        )
+    except requests.exceptions.ConnectionError:
+        print("[Channel3] Connection error: unable to reach api.trychannel3.com", flush=True)
         raise HTTPException(
             status_code=502,
-            detail="Channel3 product search failed"
+            detail="Unable to reach Channel3 API (connection failed). Check network or outbound firewall rules."
+        )
+    except requests.RequestException as e:
+        resp = getattr(e, "response", None)
+        status_code = getattr(resp, "status_code", None) if resp is not None else None
+        safe_detail = _sanitize_channel3_error_detail(resp, type(e).__name__)
+        print(f"[Channel3] RequestException (status={status_code}): {safe_detail}", flush=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Channel3 product search failed: {safe_detail}"
         )
 
 

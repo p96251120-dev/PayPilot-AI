@@ -20,6 +20,8 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      - key: CHANNEL3_API_KEY
+        sync: false
 
   - type: web
     name: paypilot-ai

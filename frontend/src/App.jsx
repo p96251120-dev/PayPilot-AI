@@ -1770,7 +1770,7 @@ async function deleteInvoice(invoiceId) {
 
   async function searchProducts() {
   if (!productQuery.trim()) {
-    setProductError("Please enter a product name.");
+    setProductError("Please enter a product name to search.");
     return;
   }
 
@@ -1791,15 +1791,20 @@ async function deleteInvoice(invoiceId) {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          query: productQuery
+          query: productQuery.trim()
         })
       }
     );
 
-    const data = await response.json();
+    let data = {};
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
 
     if (!response.ok) {
-      throw new Error(data.detail || "Product search failed.");
+      throw new Error(data?.detail || `Product search failed (HTTP ${response.status}).`);
     }
 
     const allProducts = data.products || [];
@@ -1911,13 +1916,13 @@ async function deleteInvoice(invoiceId) {
 
     if (allProducts.length === 0) {
       setProductError(
-        "No products found. Try another search."
+        "No products found. Try a different search term (e.g. 'laptop', 'keyboard', 'desk')."
       );
     }
 
   } catch (error) {
     setProductError(
-      error.message || "Unable to connect to backend."
+      error.message || "Unable to reach product search service."
     );
   } finally {
     setProductLoading(false);
@@ -3158,7 +3163,43 @@ async function loadInvoices() {
     </button>
   </div>
 
-  {productError && <p>{productError}</p>}
+  {productError && (
+    <div className="product-search-alert" role="alert" style={{
+      background: "#fff1f2",
+      border: "1px solid #fecdd3",
+      borderRadius: "8px",
+      padding: "10px 14px",
+      marginTop: "12px",
+      marginBottom: "12px",
+      color: "#9f1239",
+      fontSize: "13px",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: "10px"
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        <span style={{ fontSize: "16px" }}>⚠️</span>
+        <span>{productError}</span>
+      </div>
+      <button
+        type="button"
+        onClick={() => setProductError("")}
+        style={{
+          background: "transparent",
+          border: "none",
+          color: "#9f1239",
+          cursor: "pointer",
+          fontWeight: "bold",
+          fontSize: "14px",
+          padding: "2px 6px"
+        }}
+        title="Dismiss error"
+      >
+        ✕
+      </button>
+    </div>
+  )}
 
  
 
