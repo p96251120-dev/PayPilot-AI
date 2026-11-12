@@ -1,5 +1,5 @@
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from typing import Optional
 
 import requests
@@ -430,7 +430,243 @@ def initialize_database():
         )
 
     connection.commit()
+    seed_demo_data_if_empty(connection)
     connection.close()
+
+
+def seed_demo_data_if_empty(connection: sqlite3.Connection) -> bool:
+    """
+    Opt-in, idempotent demo dataset seeder for ephemeral cloud deployments.
+    Runs ONLY when SEED_DEMO_DATA=true AND invoices, customers, and payments are all empty.
+    Never fabricates PayPal order IDs, capture IDs, or PayPal-verified records.
+    """
+    seed_enabled = (os.getenv("SEED_DEMO_DATA") or "false").strip().lower() == "true"
+    if not seed_enabled:
+        return False
+
+    started_tx = False
+    if not connection.in_transaction:
+        connection.execute("BEGIN IMMEDIATE")
+        started_tx = True
+
+    inv_count = connection.execute("SELECT COUNT(*) FROM invoices").fetchone()[0]
+    cust_count = connection.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
+    pay_count = connection.execute("SELECT COUNT(*) FROM payments").fetchone()[0]
+    if inv_count > 0 or cust_count > 0 or pay_count > 0:
+        if started_tx:
+            connection.rollback()
+        return False
+
+    now_utc = datetime.now(timezone.utc)
+    today_utc = now_utc.date()
+    now_iso = now_utc.isoformat()
+
+    demo_customers = [
+        (
+            "CUST-DEMO-001",
+            "Aarav Mehta",
+            "aarav.mehta@novalabs.example",
+            "+1 (415) 555-0142",
+            "Nova Labs Studio",
+            "420 Mission St, San Francisco, CA 94105",
+            "Demo customer record for showcase.",
+        ),
+        (
+            "CUST-DEMO-002",
+            "Priya Nair",
+            "priya.nair@kinetix.example",
+            "+91 98201 55104",
+            "Kinetix Retail Pvt Ltd",
+            "14 MG Road, Bengaluru, KA 560001",
+            "Demo customer record for showcase.",
+        ),
+        (
+            "CUST-DEMO-003",
+            "Elena Rostova",
+            "elena@apexdynamics.example",
+            "+1 (212) 555-0198",
+            "Apex Dynamics",
+            "85 Broad St, New York, NY 10004",
+            "Demo customer record for showcase.",
+        ),
+        (
+            "CUST-DEMO-004",
+            "Marcus Vance",
+            "marcus@brightwave.example",
+            "+1 (512) 555-0166",
+            "BrightWave Media",
+            "600 Congress Ave, Austin, TX 78701",
+            "Demo customer record for showcase.",
+        ),
+        (
+            "CUST-DEMO-005",
+            "Sophia Chen",
+            "sophia.chen@vervecloud.example",
+            "+1 (206) 555-0131",
+            "Verve Cloud Systems",
+            "1201 Third Ave, Seattle, WA 98101",
+            "Demo customer record for showcase.",
+        ),
+    ]
+
+    for c_id, name, c_email, phone, company, address, notes in demo_customers:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO customers (
+                id, name, email, phone, company, address, notes, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (c_id, name, c_email, phone, company, address, notes, now_iso, now_iso),
+        )
+
+    paid_at_usd = (now_utc - timedelta(days=12)).isoformat()
+    paid_at_inr = (now_utc - timedelta(days=6)).isoformat()
+
+    demo_invoices = [
+        (
+            "INV-DEMO-1001",
+            "Aarav Mehta",
+            "aarav.mehta@novalabs.example",
+            json.dumps([
+                {"description": "UI/UX Design Sprint (Demo)", "quantity": 1, "price": 850.0},
+                {"description": "Interactive Prototype Delivery (Demo)", "quantity": 1, "price": 400.0},
+            ]),
+            1250.0,
+            "Paid",
+            "USD",
+            (today_utc - timedelta(days=10)).isoformat(),
+            "CUST-DEMO-001",
+            paid_at_usd,
+        ),
+        (
+            "INV-DEMO-1002",
+            "Priya Nair",
+            "priya.nair@kinetix.example",
+            json.dumps([
+                {"description": "Cloud Architecture Consulting (Demo)", "quantity": 1, "price": 24000.0},
+            ]),
+            24000.0,
+            "Paid",
+            "INR",
+            (today_utc - timedelta(days=5)).isoformat(),
+            "CUST-DEMO-002",
+            paid_at_inr,
+        ),
+        (
+            "INV-DEMO-1003",
+            "Elena Rostova",
+            "elena@apexdynamics.example",
+            json.dumps([
+                {"description": "API Integration & Security Review (Demo)", "quantity": 1, "price": 620.0},
+            ]),
+            620.0,
+            "Pending",
+            "USD",
+            (today_utc - timedelta(days=6)).isoformat(),
+            "CUST-DEMO-003",
+            None,
+        ),
+        (
+            "INV-DEMO-1004",
+            "Marcus Vance",
+            "marcus@brightwave.example",
+            json.dumps([
+                {"description": "Marketing Landing Page Build (Demo)", "quantity": 1, "price": 480.0},
+            ]),
+            480.0,
+            "Pending",
+            "USD",
+            today_utc.isoformat(),
+            "CUST-DEMO-004",
+            None,
+        ),
+        (
+            "INV-DEMO-1005",
+            "Sophia Chen",
+            "sophia.chen@vervecloud.example",
+            json.dumps([
+                {"description": "Performance Optimization Retainer (Demo)", "quantity": 1, "price": 350.0},
+            ]),
+            350.0,
+            "Pending",
+            "USD",
+            (today_utc + timedelta(days=2)).isoformat(),
+            "CUST-DEMO-005",
+            None,
+        ),
+        (
+            "INV-DEMO-1006",
+            "Elena Rostova",
+            "elena@apexdynamics.example",
+            json.dumps([
+                {"description": "Analytics Module Expansion (Demo Draft)", "quantity": 1, "price": 750.0},
+            ]),
+            750.0,
+            "Draft",
+            "USD",
+            (today_utc + timedelta(days=14)).isoformat(),
+            "CUST-DEMO-003",
+            None,
+        ),
+    ]
+
+    for inv_id, cust, inv_email, items_json, total, status, curr, due_dt, cust_id, paid_ts in demo_invoices:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO invoices (
+                id, customer, email, items, total, status, currency,
+                due_date, customer_id, paypal_order_id, paypal_capture_id, paid_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+            """,
+            (inv_id, cust, inv_email, items_json, total, status, curr, due_dt, cust_id, paid_ts),
+        )
+
+    # Insert clearly labeled simulated payment entries (never PayPal IDs) so legacy backfill never fabricates PayPal records
+    demo_payments = [
+        (
+            "PAY-DEMO-001",
+            "INV-DEMO-1001",
+            "Aarav Mehta",
+            "aarav.mehta@novalabs.example",
+            1250.0,
+            "USD",
+            "Completed",
+            "Demo Data (Simulated)",
+            paid_at_usd,
+            paid_at_usd,
+        ),
+        (
+            "PAY-DEMO-002",
+            "INV-DEMO-1002",
+            "Priya Nair",
+            "priya.nair@kinetix.example",
+            24000.0,
+            "INR",
+            "Completed",
+            "Demo Data (Simulated)",
+            paid_at_inr,
+            paid_at_inr,
+        ),
+    ]
+
+    for p_id, inv_id, cust, p_email, amt, curr, p_status, provider, created_ts, paid_ts in demo_payments:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO payments (
+                id, invoice_id, customer, email, amount, currency,
+                status, provider, paypal_order_id, paypal_capture_id,
+                failure_reason, created_at, paid_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+            """,
+            (p_id, inv_id, cust, p_email, amt, curr, p_status, provider, created_ts, paid_ts),
+        )
+
+    if started_tx:
+        connection.commit()
+    return True
 
 
 initialize_database()
@@ -733,7 +969,7 @@ def get_payment_reminders(override_today: Optional[str] = None):
     3. Overdue: Unpaid invoice whose due date has passed.
     Draft and Paid invoices are strictly excluded.
     """
-    today_date = date.today()
+    today_date = datetime.now(timezone.utc).date()
     if override_today:
         try:
             today_date = datetime.strptime(override_today.strip()[:10], "%Y-%m-%d").date()
@@ -2121,15 +2357,35 @@ def get_reports_analytics(
         reverse=True
     )
 
-    # Payments Gateway Statistics
+    # Payments Gateway Statistics (distinguishing PayPal Sandbox captures from simulated demo entries)
     completed_pays = [p for p in filtered_payments if (p["status"] or "").lower() == "completed"]
     pending_pays = [p for p in filtered_payments if (p["status"] or "").lower() == "pending"]
     failed_pays = [p for p in filtered_payments if (p["status"] or "").lower() == "failed"]
+
+    simulated_completed_pays = [
+        p for p in completed_pays
+        if (p["provider"] or "").strip().lower() == "demo data (simulated)"
+    ]
+    paypal_capture_pays = [
+        p for p in completed_pays
+        if (p["provider"] or "").strip().lower() != "demo data (simulated)"
+        and (bool(p["paypal_capture_id"]) or (p["provider"] or "").strip().lower() == "paypal sandbox")
+    ]
 
     settled_volume = {}
     for p in completed_pays:
         c = (p["currency"] or "USD").upper().strip()
         settled_volume[c] = round(settled_volume.get(c, 0.0) + float(p["amount"] or 0), 2)
+
+    paypal_settled_volume = {}
+    for p in paypal_capture_pays:
+        c = (p["currency"] or "USD").upper().strip()
+        paypal_settled_volume[c] = round(paypal_settled_volume.get(c, 0.0) + float(p["amount"] or 0), 2)
+
+    simulated_settled_volume = {}
+    for p in simulated_completed_pays:
+        c = (p["currency"] or "USD").upper().strip()
+        simulated_settled_volume[c] = round(simulated_settled_volume.get(c, 0.0) + float(p["amount"] or 0), 2)
 
     failed_volume = {}
     for p in failed_pays:
@@ -2158,10 +2414,15 @@ def get_reports_analytics(
         "payments_stats": {
             "total_transactions": len(filtered_payments),
             "completed_count": len(completed_pays),
+            "paypal_capture_count": len(paypal_capture_pays),
+            "simulated_completed_count": len(simulated_completed_pays),
+            "paypal_checkout_attempts": len(paypal_capture_pays) + len(pending_pays) + len(failed_pays),
             "pending_count": len(pending_pays),
             "failed_count": len(failed_pays),
             "success_rate_percent": success_rate,
             "settled_volume": settled_volume,
+            "paypal_settled_volume": paypal_settled_volume,
+            "simulated_settled_volume": simulated_settled_volume,
             "failed_volume": failed_volume
         },
         "monthly_trends": sorted_monthly,

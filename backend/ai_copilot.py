@@ -236,7 +236,7 @@ def handle_revenue_overview(conn, query: str) -> dict:
     table = {
         "columns": ["Invoice Status", "Count", "Aggregate Value", "Settlement State"],
         "rows": [
-            ["Paid (Settled)", str(paid_count), format_multi_currency(paid_totals), "Fully settled via verified capture"],
+            ["Paid (Settled)", str(paid_count), format_multi_currency(paid_totals), "Fully settled via verified capture" if paid_count > 0 and all(inv.get("paypal_capture_id") for inv in invoices if (inv.get("status") or "").capitalize() == "Paid") else ("Settled in invoice ledger (includes demo/non-PayPal)" if paid_count > 0 else "No settled invoices yet")],
             ["Pending Checkout", str(pending_count), format_multi_currency(pending_totals), "Awaiting buyer sandbox authorization"],
             ["Overdue Risk", str(overdue_count), format_multi_currency(overdue_totals), "Due date elapsed · Action required"],
             ["Drafts", str(draft_count), format_multi_currency(draft_totals), "Saved in local ledger"],

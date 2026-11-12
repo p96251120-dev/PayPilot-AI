@@ -2512,7 +2512,23 @@ async function loadInvoices() {
                         <div className="efficiency-fill" style={{ width: `${paidPct}%` }}></div>
                       </div>
                       <p className="hero-supporting-text">
-                        {paidInvoices.length} of {totalCount} invoices settled · Verified Sandbox captures & audit ledger
+                        {(() => {
+                          const verifiedPayPalCount = paidInvoices.filter(inv => Boolean(inv.paypal_capture_id)).length;
+                          const demoPaidCount = paidInvoices.filter(inv =>
+                            !inv.paypal_capture_id &&
+                            savedPayments.some(p => p.invoice_id === inv.id && (p.provider || "").toLowerCase() === "demo data (simulated)")
+                          ).length;
+                          if (verifiedPayPalCount > 0 && demoPaidCount > 0) {
+                            return `${paidInvoices.length} of ${totalCount} invoices settled · ${verifiedPayPalCount} PayPal Sandbox, ${demoPaidCount} demo simulated`;
+                          }
+                          if (verifiedPayPalCount > 0) {
+                            return `${paidInvoices.length} of ${totalCount} invoices settled · ${verifiedPayPalCount} PayPal Sandbox capture${verifiedPayPalCount === 1 ? "" : "s"} & audit ledger`;
+                          }
+                          if (demoPaidCount > 0) {
+                            return `${paidInvoices.length} of ${totalCount} invoices settled · Simulated demo data (no PayPal capture yet)`;
+                          }
+                          return `${paidInvoices.length} of ${totalCount} invoices settled · PayPal Sandbox & audit ledger`;
+                        })()}
                       </p>
                     </div>
                   </div>
@@ -3927,7 +3943,7 @@ async function loadInvoices() {
                   <div className="stat-card">
                     <div className="stat-top"><span>Total Paid Amount</span></div>
                     {renderCurrencyBreakdown(activeCustomer.total_paid || {})}
-                    <span className="stat-subtext">Verified collected revenue</span>
+                    <span className="stat-subtext">Settled invoice revenue</span>
                   </div>
                   <div className="stat-card">
                     <div className="stat-top"><span>Outstanding Balance</span></div>
@@ -4252,7 +4268,7 @@ async function loadInvoices() {
                   <div className="stat-card">
                     <div className="stat-top"><span>Total Paid Revenue</span></div>
                     {renderCurrencyBreakdown(reportsAnalytics.revenue_overview?.total_paid || {})}
-                    <span className="stat-subtext">Verified collected revenue</span>
+                    <span className="stat-subtext">Settled invoice revenue</span>
                   </div>
                   <div className="stat-card">
                     <div className="stat-top"><span>Outstanding Balances</span></div>
@@ -4273,7 +4289,10 @@ async function loadInvoices() {
                     <div className="stat-top"><span>Payment Success Rate</span></div>
                     <h2>{reportsAnalytics.payments_stats?.success_rate_percent || 100}%</h2>
                     <span className="stat-subtext">
-                      {reportsAnalytics.payments_stats?.completed_count || 0} completed of {reportsAnalytics.payments_stats?.total_transactions || 0} checkout attempts
+                      {reportsAnalytics.payments_stats?.paypal_capture_count ?? 0} PayPal capture{(reportsAnalytics.payments_stats?.paypal_capture_count ?? 0) === 1 ? "" : "s"}
+                      {(reportsAnalytics.payments_stats?.simulated_completed_count ?? 0) > 0
+                        ? ` · ${reportsAnalytics.payments_stats.simulated_completed_count} simulated demo`
+                        : ` of ${reportsAnalytics.payments_stats?.total_transactions || 0} attempts`}
                     </span>
                   </div>
                 </div>
@@ -4285,7 +4304,7 @@ async function loadInvoices() {
                     <div className="panel-heading">
                       <div>
                         <h3>Monthly Invoiced vs. Settled Revenue</h3>
-                        <p>Timeline of invoiced volume vs. verified PayPal collections</p>
+                        <p>Timeline of invoiced volume vs. settled collections</p>
                       </div>
                     </div>
 
